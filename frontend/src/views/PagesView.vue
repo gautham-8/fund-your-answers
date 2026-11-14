@@ -15,17 +15,36 @@ const RENDER_WIDTH = 1400 // px; sharp enough for the single-page view, reused f
 
 const sub = ref(null)
 const error = ref('')
-const pages = ref([]) // per question: selected page numbers
+const pages = ref([]) // per question: selected PDF page numbers
+const order = ref([]) // PDF page numbers in the order the student arranged them
+const rotations = ref([]) // clockwise degrees, index = page - 1
 const images = ref([]) // object URL per rendered page, index = page - 1
-const pageCount = ref(0)
 const active = ref(0) // question being assigned
-const viewing = ref(null) // page number shown large, null = grid
+const viewing = ref(null) // PDF page number shown large, null = grid
+const dragFrom = ref(null) // index in order
+const dragOver = ref(null)
 const saving = ref(false)
+let pdf = null
 let pdfUrl = null
 
 const parts = computed(() => sub.value?.parts || [])
 const owners = (p) => pages.value.flatMap((list, i) => (list.includes(p) ? [i] : []))
 const missing = computed(() => pages.value.filter((l) => !l.length).length)
+const pos = computed(() => order.value.indexOf(viewing.value))
+
+async function render(n) {
+  const page = await pdf.getPage(n)
+  const rotation = (page.rotate + rotations.value[n - 1]) % 360
+  const base = page.getViewport({ scale: 1, rotation })
+  const viewport = page.getViewport({ scale: RENDER_WIDTH / base.width, rotation })
+  const canvas = document.createElement('canvas')
+  canvas.width = viewport.width
+  canvas.height = viewport.height
+  await page.render({ canvas, viewport }).promise
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.85))
+  if (images.value[n - 1]) URL.revokeObjectURL(images.value[n - 1])
+  images.value[n - 1] = URL.createObjectURL(blob)
+}
 
 async function load() {
   try {
@@ -33,19 +52,12 @@ async function load() {
     if (!sub.value.page_map) return router.replace(`/assignments/${sub.value.assignment.id}`)
     pages.value = sub.value.page_map.map((l) => [...l])
     pdfUrl = await blobUrl(`/api/submissions/${props.id}/pdf`)
-    const pdf = await getDocument({ url: pdfUrl }).promise
-    pageCount.value = pdf.numPages
-    for (let n = 1; n <= pdf.numPages; n++) {
-      const page = await pdf.getPage(n)
-      const base = page.getViewport({ scale: 1 })
-      const viewport = page.getViewport({ scale: RENDER_WIDTH / base.width })
-      const canvas = document.createElement('canvas')
-      canvas.width = viewport.width
-      canvas.height = viewport.height
-      await page.render({ canvas, viewport }).promise
-      const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.85))
-      images.value[n - 1] = URL.createObjectURL(blob)
-    }
+    pdf = await getDocument({ url: pdfUrl }).promise
+    const n = pdf.numPages
+    const saved = sub.value.page_order
+    order.value = saved?.length === n ? [...saved] : Array.from({ length: n }, (_, i) => i + 1)
+    rotations.value = sub.value.page_rotation?.length === n ? [...sub.value.page_rotation] : Array(n).fill(0)
+    for (const p of order.value) await render(p)
   } catch (e) {
     error.value = e.message
   }
@@ -58,8 +70,31 @@ function toggle(p) {
   else list.push(p), list.sort((a, b) => a - b)
 }
 
+function move(from, to) {
+  if (from == null || to < 0 || to >= order.value.length || from === to) return
+  const [p] = order.value.splice(from, 1)
+  order.value.splice(to, 0, p)
+}
+
+function rotate(p) {
+  rotations.value[p - 1] = (rotations.value[p - 1] + 90) % 360
+  render(p).catch((e) => toast(e.message, { type: 'error' }))
+}
+
+function onDragStart(e, i) {
+  dragFrom.value = i
+  e.dataTransfer.effectAllowed = 'move'
+  e.dataTransfer.setData('text/plain', String(i)) // Firefox won't start a drag without data
+}
+
+function onDrop(i) {
+  move(dragFrom.value, i)
+  dragFrom.value = dragOver.value = null
+}
+
 function step(d) {
-  viewing.value = Math.min(pageCount.value, Math.max(1, viewing.value + d))
+  const i = pos.value + d
+  if (i >= 0 && i < order.value.length) viewing.value = order.value[i]
 }
 
 function onKey(e) {
@@ -72,7 +107,10 @@ function onKey(e) {
 async function confirm() {
   saving.value = true
   try {
-    await api(`/api/submissions/${props.id}/pages`, { method: 'PUT', body: { pages: pages.value } })
+    await api(`/api/submissions/${props.id}/pages`, {
+      method: 'PUT',
+      body: { pages: pages.value, order: order.value, rotation: rotations.value },
+    })
     toast('Pages confirmed. Your viva is ready')
     router.push(`/assignments/${sub.value.assignment.id}`)
   } catch (e) {
@@ -90,6 +128,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
   images.value.forEach((u) => u && URL.revokeObjectURL(u))
   if (pdfUrl) URL.revokeObjectURL(pdfUrl)
+  pdf?.destroy()
 })
 </script>
 
@@ -105,7 +144,7 @@ onUnmounted(() => {
             <Icon name="chevron-left" :size="14" />{{ sub.assignment.title }}
           </RouterLink>
           <h1 class="mt-1 text-2xl font-semibold tracking-tight">Select answer pages</h1>
-          <p class="mt-1 text-sm text-slate-500">Pick a question on the right, then click every page that answers it. We pre-selected our best guess.</p>
+          <p class="mt-1 text-sm text-slate-500">Drag pages to fix their order and rotate sideways scans. Then pick a question on the right and click every page that answers it. We pre-selected our best guess.</p>
         </div>
       </div>
 
@@ -117,8 +156,9 @@ onUnmounted(() => {
               Assigning to <span class="font-semibold text-indigo-700">Q{{ active + 1 }}</span>
               <span class="text-slate-400"> · {{ pages[active].length }} page{{ pages[active].length === 1 ? '' : 's' }} selected</span>
             </div>
-            <div v-if="viewing != null" class="flex items-center gap-2">
-              <span class="text-sm text-slate-500">Page {{ viewing }} of {{ pageCount }}</span>
+            <div v-if="viewing != null" class="flex flex-wrap items-center gap-2">
+              <span class="text-sm text-slate-500">Page {{ viewing }} · {{ pos + 1 }} of {{ order.length }}</span>
+              <button class="btn-secondary btn-sm" title="Rotate clockwise" @click="rotate(viewing)"><Icon name="rotate-cw" :size="14" />Rotate</button>
               <button :class="pages[active].includes(viewing) ? 'btn-secondary' : 'btn-primary'" class="btn-sm" @click="toggle(viewing)">
                 <Icon :name="pages[active].includes(viewing) ? 'x' : 'check'" :size="14" />
                 {{ pages[active].includes(viewing) ? `Remove from Q${active + 1}` : `Add to Q${active + 1}` }}
@@ -127,18 +167,28 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- Grid of all pages -->
+          <!-- Grid of all pages, in the student's order -->
           <div v-if="viewing == null" class="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <div v-for="p in pageCount || sub.page_count" :key="p" class="group relative">
+            <div
+              v-for="(p, i) in order"
+              :key="p"
+              class="group relative rounded-lg transition"
+              :class="[dragFrom === i && 'opacity-40', dragOver === i && dragFrom !== i && 'outline-2 outline-offset-4 outline-dashed outline-indigo-400']"
+              draggable="true"
+              @dragstart="onDragStart($event, i)"
+              @dragover.prevent="dragOver = i"
+              @drop.prevent="onDrop(i)"
+              @dragend="dragFrom = dragOver = null"
+            >
               <button
                 type="button"
-                class="relative block w-full overflow-hidden rounded-lg border-2 bg-white shadow-xs transition"
+                class="relative block w-full cursor-grab overflow-hidden rounded-lg border-2 bg-white shadow-xs transition active:cursor-grabbing"
                 :class="pages[active].includes(p) ? 'border-indigo-600 ring-4 ring-indigo-600/15' : 'border-transparent hover:border-indigo-300'"
                 :aria-pressed="pages[active].includes(p)"
                 :title="pages[active].includes(p) ? `Remove page ${p} from Q${active + 1}` : `Add page ${p} to Q${active + 1}`"
                 @click="toggle(p)"
               >
-                <img v-if="images[p - 1]" :src="images[p - 1]" :alt="`Page ${p}`" class="block w-full" />
+                <img v-if="images[p - 1]" :src="images[p - 1]" :alt="`Page ${p}`" draggable="false" class="block w-full" />
                 <div v-else class="skeleton aspect-[8.5/11] w-full rounded-none"></div>
                 <span
                   v-if="pages[active].includes(p)"
@@ -149,15 +199,26 @@ onUnmounted(() => {
                 <div class="flex flex-wrap items-center gap-1">
                   <span class="text-xs font-medium text-slate-500">Page {{ p }}</span>
                   <span
-                    v-for="i in owners(p)"
-                    :key="i"
+                    v-for="q in owners(p)"
+                    :key="q"
                     class="rounded px-1.5 py-0.5 text-[11px] font-semibold"
-                    :class="i === active ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-600'"
-                  >Q{{ i + 1 }}</span>
+                    :class="q === active ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-600'"
+                  >Q{{ q + 1 }}</span>
                 </div>
-                <button class="icon-btn size-6 opacity-0 group-hover:opacity-100 focus:opacity-100" :title="`View page ${p}`" @click="viewing = p">
-                  <Icon name="eye" :size="14" />
-                </button>
+                <div class="flex items-center opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+                  <button class="icon-btn size-6 disabled:opacity-30" :disabled="i === 0" :title="`Move page ${p} earlier`" @click="move(i, i - 1)">
+                    <Icon name="chevron-left" :size="14" />
+                  </button>
+                  <button class="icon-btn size-6 disabled:opacity-30" :disabled="i === order.length - 1" :title="`Move page ${p} later`" @click="move(i, i + 1)">
+                    <Icon name="chevron-right" :size="14" />
+                  </button>
+                  <button class="icon-btn size-6" :title="`Rotate page ${p}`" @click="rotate(p)">
+                    <Icon name="rotate-cw" :size="14" />
+                  </button>
+                  <button class="icon-btn size-6" :title="`View page ${p}`" @click="viewing = p">
+                    <Icon name="eye" :size="14" />
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -167,10 +228,10 @@ onUnmounted(() => {
             <div class="relative mx-auto max-w-3xl">
               <img v-if="images[viewing - 1]" :src="images[viewing - 1]" :alt="`Page ${viewing}`" class="block w-full rounded-lg bg-white shadow-sm" />
               <div v-else class="skeleton aspect-[8.5/11] w-full"></div>
-              <button class="absolute top-1/2 -left-3 grid size-10 -translate-y-1/2 place-items-center rounded-full border border-slate-200 bg-white shadow disabled:opacity-40" :disabled="viewing <= 1" title="Previous page" @click="step(-1)">
+              <button class="absolute top-1/2 -left-3 grid size-10 -translate-y-1/2 place-items-center rounded-full border border-slate-200 bg-white shadow disabled:opacity-40" :disabled="pos <= 0" title="Previous page" @click="step(-1)">
                 <Icon name="chevron-left" />
               </button>
-              <button class="absolute top-1/2 -right-3 grid size-10 -translate-y-1/2 place-items-center rounded-full border border-slate-200 bg-white shadow disabled:opacity-40" :disabled="viewing >= pageCount" title="Next page" @click="step(1)">
+              <button class="absolute top-1/2 -right-3 grid size-10 -translate-y-1/2 place-items-center rounded-full border border-slate-200 bg-white shadow disabled:opacity-40" :disabled="pos >= order.length - 1" title="Next page" @click="step(1)">
                 <Icon name="chevron-right" />
               </button>
             </div>

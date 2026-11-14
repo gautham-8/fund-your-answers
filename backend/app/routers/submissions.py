@@ -1,4 +1,5 @@
 from collections import Counter
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -105,6 +106,8 @@ async def get_assignment(assignment_id: str, user: dict = Depends(current_user))
             **_sub_summary(sub),
             "page_map": sub.get("page_map"),
             "page_count": sub.get("page_count"),
+            "page_order": sub.get("page_order"),
+            "page_rotation": sub.get("page_rotation"),
             "pages_pending": pipeline.pages_pending(sub),
         } if sub else None
         if sub:
@@ -170,6 +173,8 @@ async def upload_submission(
         "analysis": None,
         "questions": [],
         "page_map": None,
+        "page_order": None,
+        "page_rotation": None,
         "pages_confirmed_at": None,
         "consent_at": None,
         "error": None,
@@ -210,6 +215,8 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
             "parts": assignment.get("parts") or [],
             "page_map": sub.get("page_map"),
             "page_count": sub.get("page_count"),
+            "page_order": sub.get("page_order"),
+            "page_rotation": sub.get("page_rotation"),
             "pages_pending": pipeline.pages_pending(sub),
         })
         return out
@@ -252,6 +259,8 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
 
 class PagesIn(BaseModel):
     pages: list[list[int]] = Field(description="Pages for each assignment question, in order")
+    order: list[int] | None = Field(None, description="Every PDF page once, in the order the student arranged them")
+    rotation: list[Literal[0, 90, 180, 270]] | None = Field(None, description="Clockwise degrees per PDF page")
 
 
 @router.put("/submissions/{submission_id}/pages")
@@ -265,9 +274,17 @@ async def confirm_pages(submission_id: str, body: PagesIn, user: dict = Depends(
     page_count = sub.get("page_count") or 0
     if any(not 1 <= p <= page_count for pages in body.pages for p in pages):
         raise HTTPException(400, f"Pages must be between 1 and {page_count}")
+    if body.order is not None and sorted(body.order) != list(range(1, page_count + 1)):
+        raise HTTPException(400, "Page order must list every page exactly once")
+    if body.rotation is not None and len(body.rotation) != page_count:
+        raise HTTPException(400, "Give a rotation for every page")
     page_map = [pipeline.clean_pages(pages, page_count) for pages in body.pages]
     await db.submissions.update_one(
-        {"_id": sub["_id"]}, {"$set": {"page_map": page_map, "pages_confirmed_at": db.now()}}
+        {"_id": sub["_id"]},
+        {"$set": {
+            "page_map": page_map, "page_order": body.order, "page_rotation": body.rotation,
+            "pages_confirmed_at": db.now(),
+        }},
     )
     return {"page_map": page_map, "pages_pending": False}
 
