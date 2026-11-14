@@ -125,5 +125,18 @@ onMounted(load)
         <StatusBadge v-if="!isInstructor" :status="a.my_status" />
       </RouterLink>
     </div>
+
+    <section v-if="isInstructor" class="mt-8">
+      <h2 class="mb-3 text-lg font-semibold">Students</h2>
+      <p v-if="!course.students.length" class="text-slate-500">
+        No students yet. Share the join code <span class="font-mono font-semibold">{{ course.join_code }}</span> with your class.
+      </p>
+      <div v-else class="card divide-y divide-slate-100 p-0">
+        <div v-for="s in course.students" :key="s.id" class="flex justify-between px-4 py-2 text-sm">
+          <span class="font-medium">{{ s.name }}</span>
+          <span class="text-slate-500">{{ s.email }}</span>
+        </div>
+      </div>
+    </section>
   </template>
 </template>

@@ -3,6 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from pymongo.errors import DuplicateKeyError
 
+from .. import audio as audio_codec
 from .. import db, gemini, pipeline, storage
 from ..access import load_submission
 from ..auth import current_user, student
@@ -101,14 +102,20 @@ async def answer(
         raise HTTPException(502, f"Could not process the answer, please try again ({str(e)[:200]})")
 
     # Store the recording only once the answer was processed, so failed attempts leave nothing behind.
+    # Gemini got the original; we keep a compressed copy for playback when ffmpeg is available.
     audio_file_id = None
     if audio_bytes:
+        stored, stored_mime = audio_bytes, audio_mime
+        mp3 = await audio_codec.to_mp3(audio_bytes)
+        if mp3:
+            stored, stored_mime = mp3, "audio/mpeg"
         audio_file_id = await storage.save(
-            audio_bytes,
-            f"q{question_index + 1}_{kind}.{AUDIO_EXT.get(audio_mime, 'bin')}",
-            audio_mime,
+            stored,
+            f"q{question_index + 1}_{kind}.{AUDIO_EXT.get(stored_mime, 'bin')}",
+            stored_mime,
             kind="viva_audio",
             submission_id=sub["_id"],
+            original_bytes=len(audio_bytes),
         )
 
     turn = {

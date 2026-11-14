@@ -1,6 +1,8 @@
+import time
+from collections import defaultdict
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 from pymongo.errors import DuplicateKeyError
 
@@ -43,11 +45,32 @@ async def register(body: RegisterIn):
     return _auth_response(user)
 
 
+# Simple in-memory brute-force guard (fine for a single instance).
+MAX_FAILURES = 5
+WINDOW_SECONDS = 15 * 60
+_failures: dict[tuple[str, str], list[float]] = defaultdict(list)
+
+
+def _recent_failures(key: tuple[str, str]) -> list[float]:
+    cutoff = time.monotonic() - WINDOW_SECONDS
+    _failures[key] = [t for t in _failures[key] if t > cutoff]
+    return _failures[key]
+
+
 @router.post("/login")
-async def login(body: LoginIn):
-    user = await db.users.find_one({"email": body.email.lower()})
+async def login(body: LoginIn, request: Request):
+    email = body.email.lower()
+    key = (request.client.host if request.client else "?", email)
+    recent = _recent_failures(key)
+    if len(recent) >= MAX_FAILURES:
+        wait = int(WINDOW_SECONDS - (time.monotonic() - recent[0])) // 60 + 1
+        raise HTTPException(429, f"Too many failed attempts. Try again in about {wait} minutes.")
+
+    user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
+        recent.append(time.monotonic())
         raise HTTPException(401, "Wrong email or password")
+    _failures.pop(key, None)
     return _auth_response(user)
 
 

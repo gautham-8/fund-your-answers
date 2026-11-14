@@ -105,6 +105,11 @@ async def get_course(course_id: str, user: dict = Depends(current_user)):
         }
         for a in assignments
     ]
+    if user["role"] == "instructor":
+        students = await db.users.find(
+            {"_id": {"$in": course.get("student_ids", [])}}, {"name": 1, "email": 1}
+        ).sort("name", 1).to_list(None)
+        out["students"] = [{"id": str(s["_id"]), "name": s["name"], "email": s["email"]} for s in students]
     return out
 
 

@@ -54,6 +54,9 @@ async def upload_submission(
     user: dict = Depends(student),
 ):
     assignment, _ = await load_assignment(user, assignment_id)
+    due = assignment.get("due_date")
+    if due and db.now() > due:
+        raise HTTPException(400, "The due date has passed, so new submissions are closed")
 
     data = await file.read()
     if len(data) > settings.max_pdf_mb * 1024 * 1024:

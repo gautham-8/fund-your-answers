@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../lib/api'
 import { auth } from '../lib/auth'
 import StatusBadge from '../components/StatusBadge.vue'
+import ClassInsights from '../components/ClassInsights.vue'
 
 const props = defineProps({ id: String })
 const isInstructor = auth.user?.role === 'instructor'
@@ -54,7 +55,10 @@ async function retry(subId) {
   }
 }
 
-const canUpload = computed(() => !mySub.value || ['analyzing', 'analysis_failed', 'ready'].includes(mySub.value.status))
+const pastDue = computed(() => !!a.value?.due_date && new Date(a.value.due_date) < new Date())
+const canUpload = computed(
+  () => !pastDue.value && (!mySub.value || ['analyzing', 'analysis_failed', 'ready'].includes(mySub.value.status)),
+)
 const fmt = (d) => (d ? new Date(d).toLocaleString() : 'No due date')
 
 onMounted(load)
@@ -66,7 +70,10 @@ onUnmounted(() => clearTimeout(timer))
   <template v-if="a">
     <RouterLink :to="`/courses/${a.course.id}`" class="text-sm text-indigo-600 hover:underline">← {{ a.course.name }}</RouterLink>
     <h1 class="mt-2 text-2xl font-bold">{{ a.title }}</h1>
-    <p class="text-sm text-slate-500">Due: {{ fmt(a.due_date) }}</p>
+    <p class="text-sm text-slate-500">
+      Due: {{ fmt(a.due_date) }}
+      <span v-if="pastDue" class="ml-1 rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-700">Closed</span>
+    </p>
     <p v-if="a.description" class="mt-3 whitespace-pre-line text-slate-700">{{ a.description }}</p>
 
     <details class="mt-3 text-sm text-slate-600">
@@ -109,6 +116,7 @@ onUnmounted(() => clearTimeout(timer))
         Viva complete, but scoring hit an error. <button class="underline" @click="retry(mySub.id)">Retry scoring</button>
       </div>
 
+      <p v-if="pastDue && !mySub" class="text-sm text-slate-500">The due date has passed, so submissions are closed.</p>
       <form v-if="canUpload" class="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center" @submit.prevent="upload">
         <input type="file" accept="application/pdf" class="text-sm" @change="file = $event.target.files[0]" />
         <button class="btn-primary" :disabled="!file || uploading">{{ uploading ? 'Uploading…' : mySub ? 'Replace PDF' : 'Submit PDF' }}</button>
@@ -148,6 +156,7 @@ onUnmounted(() => clearTimeout(timer))
           </tbody>
         </table>
       </div>
+      <ClassInsights :assignment-id="id" />
     </section>
   </template>
 </template>
