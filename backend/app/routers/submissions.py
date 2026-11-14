@@ -1,7 +1,9 @@
+from collections import Counter
+
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from .. import db, pipeline, storage
+from .. import db, pipeline, schedule, storage
 from ..access import load_assignment, load_submission
 from ..auth import current_user, instructor, student
 from ..config import settings
@@ -18,18 +20,93 @@ def _sub_summary(sub: dict) -> dict:
         "created_at": sub.get("created_at"),
         "overall": sub.get("overall"),
         "needs_review": sub.get("needs_review"),
+        "late": bool(sub.get("late")),
     }
+
+
+def _regrade_out(r: dict) -> dict:
+    return {
+        "id": str(r["_id"]),
+        "submission_id": str(r["submission_id"]),
+        "dimension_index": r["dimension_index"],
+        "dimension": r["dimension"],
+        "message": r["message"],
+        "status": r["status"],
+        "response": r.get("response", ""),
+        "score_before": r.get("score_before"),
+        "score_after": r.get("score_after"),
+        "created_at": r["created_at"],
+        "resolved_at": r.get("resolved_at"),
+        "resolved_by": r.get("resolved_by"),
+    }
+
+
+async def student_results(sub: dict, assignment: dict) -> dict | None:
+    """What a student sees once grades are published: final scores and feedback, no AI confidence."""
+    if not assignment.get("grades_published") or sub["status"] != pipeline.COMPLETED:
+        return None
+    score = await db.scores.find_one({"submission_id": sub["_id"]})
+    if not score:
+        return None
+    regrades = await db.regrade_requests.find({"submission_id": sub["_id"]}).sort("created_at", -1).to_list(None)
+    return {
+        "overall": score["overall"],
+        "summary": score.get("summary", ""),
+        "dimensions": [
+            {
+                "dimension": d["dimension"],
+                "score": d["override_score"] if d.get("override_score") is not None else d["score"],
+                "max": 5,
+                "evidence_quote": d.get("evidence_quote", ""),
+                "rationale": d.get("rationale", ""),
+                "instructor_note": d.get("override_note", "") if d.get("override_score") is not None else "",
+                "adjusted": d.get("override_score") is not None,
+            }
+            for d in score["dimensions"]
+        ],
+        "regrade_requests": [_regrade_out(r) for r in regrades],
+    }
+
+
+async def apply_override(sub: dict, dim_index: int, override_score: int | None, note: str, user: dict) -> dict:
+    score = await db.scores.find_one({"submission_id": sub["_id"]})
+    if not score or not (0 <= dim_index < len(score["dimensions"])):
+        raise HTTPException(404, "Score not found")
+
+    dims = score["dimensions"]
+    dims[dim_index]["override_score"] = override_score
+    dims[dim_index]["override_note"] = note.strip()
+    dims[dim_index]["overridden_by"] = user["name"] if override_score is not None else None
+    overall = pipeline.overall_score(dims)
+    # A dimension the instructor has overridden no longer needs review.
+    needs_review = any(d["needs_review"] and d.get("override_score") is None for d in dims)
+
+    await db.scores.update_one(
+        {"_id": score["_id"]}, {"$set": {"dimensions": dims, "overall": overall, "needs_review": needs_review}}
+    )
+    await db.submissions.update_one({"_id": sub["_id"]}, {"$set": {"overall": overall, "needs_review": needs_review}})
+    return {"dimensions": dims, "overall": overall, "needs_review": needs_review}
 
 
 @router.get("/assignments/{assignment_id}")
 async def get_assignment(assignment_id: str, user: dict = Depends(current_user)):
     assignment, course = await load_assignment(user, assignment_id)
     out = db.serialize(assignment)
-    out["course"] = {"id": str(course["_id"]), "name": course["name"]}
+    out["course"] = {"id": str(course["_id"]), "name": course["name"], "code": course.get("code", "")}
+    out["grades_published"] = bool(assignment.get("grades_published"))
+    now = db.now()
+    out["released"] = schedule.is_released(assignment, now)
+    deadline = schedule.deadline(assignment)
+    out["accepting_submissions"] = out["released"] and (deadline is None or now <= deadline)
 
     if user["role"] == "student":
         sub = await db.submissions.find_one({"assignment_id": assignment["_id"], "student_id": user["_id"]})
         out["my_submission"] = _sub_summary(sub) if sub else None
+        if sub:
+            results = await student_results(sub, assignment)
+            if results:
+                out["my_submission"]["overall"] = results["overall"]
+            out["my_results"] = results
     else:
         subs = await db.submissions.find({"assignment_id": assignment["_id"]}).sort("created_at", -1).to_list(None)
         students = await db.users.find({"_id": {"$in": [s["student_id"] for s in subs]}}).to_list(None)
@@ -42,7 +119,17 @@ async def get_assignment(assignment_id: str, user: dict = Depends(current_user))
             }
             for s in subs
         ]
+        submitted = {s["student_id"] for s in subs}
+        missing = await db.users.find(
+            {"_id": {"$in": [i for i in course.get("student_ids", []) if i not in submitted]}}, {"name": 1, "email": 1}
+        ).sort("name", 1).to_list(None)
+        out["missing"] = [{"id": str(u["_id"]), "name": u["name"], "email": u["email"]} for u in missing]
         out["student_count"] = len(course.get("student_ids", []))
+        regrades = Counter()
+        async for r in db.regrade_requests.find({"assignment_id": assignment["_id"], "status": "open"}, {"submission_id": 1}):
+            regrades[str(r["submission_id"])] += 1
+        for s in out["submissions"]:
+            s["open_regrades"] = regrades[s["id"]]
     return out
 
 
@@ -54,9 +141,11 @@ async def upload_submission(
     user: dict = Depends(student),
 ):
     assignment, _ = await load_assignment(user, assignment_id)
-    due = assignment.get("due_date")
-    if due and db.now() > due:
-        raise HTTPException(400, "The due date has passed, so new submissions are closed")
+    now = db.now()
+    deadline = schedule.deadline(assignment)
+    if deadline and now > deadline:
+        what = "late due date" if assignment.get("late_due_date") else "due date"
+        raise HTTPException(400, f"The {what} has passed, so new submissions are closed")
 
     data = await file.read()
     if len(data) > settings.max_pdf_mb * 1024 * 1024:
@@ -77,7 +166,8 @@ async def upload_submission(
         "questions": [],
         "consent_at": None,
         "error": None,
-        "created_at": db.now(),
+        "late": schedule.is_late(assignment, now),
+        "created_at": now,
     }
     if existing:
         sub_id = existing["_id"]
@@ -100,12 +190,15 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
     sub, assignment, course = await load_submission(user, submission_id)
     out = _sub_summary(sub)
     out["assignment"] = {"id": str(assignment["_id"]), "title": assignment["title"]}
-    out["course"] = {"id": str(course["_id"]), "name": course["name"]}
+    out["course"] = {"id": str(course["_id"]), "name": course["name"], "code": course.get("code", "")}
 
     if user["role"] == "student":
-        # Students see progress only; scores are for the instructor to review first.
+        # Students see progress only until the instructor publishes grades.
         out.pop("overall", None)
         out.pop("needs_review", None)
+        results = await student_results(sub, assignment)
+        if results:
+            out["results"] = results
         return out
 
     stu = await db.users.find_one({"_id": sub["student_id"]})
@@ -132,6 +225,11 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
             for t in turns
         ],
         "score": db.serialize(score),
+        "grades_published": bool(assignment.get("grades_published")),
+        "regrade_requests": [
+            _regrade_out(r)
+            for r in await db.regrade_requests.find({"submission_id": sub["_id"]}).sort("created_at", -1).to_list(None)
+        ],
     })
     return out
 
@@ -168,20 +266,4 @@ class OverrideIn(BaseModel):
 @router.patch("/submissions/{submission_id}/scores/{dim_index}")
 async def override_score(submission_id: str, dim_index: int, body: OverrideIn, user: dict = Depends(instructor)):
     sub, _, _ = await load_submission(user, submission_id)
-    score = await db.scores.find_one({"submission_id": sub["_id"]})
-    if not score or not (0 <= dim_index < len(score["dimensions"])):
-        raise HTTPException(404, "Score not found")
-
-    dims = score["dimensions"]
-    dims[dim_index]["override_score"] = body.override_score
-    dims[dim_index]["override_note"] = body.override_note.strip()
-    dims[dim_index]["overridden_by"] = user["name"] if body.override_score is not None else None
-    overall = pipeline.overall_score(dims)
-    # A dimension the instructor has overridden no longer needs review.
-    needs_review = any(d["needs_review"] and d.get("override_score") is None for d in dims)
-
-    await db.scores.update_one(
-        {"_id": score["_id"]}, {"$set": {"dimensions": dims, "overall": overall, "needs_review": needs_review}}
-    )
-    await db.submissions.update_one({"_id": sub["_id"]}, {"$set": {"overall": overall, "needs_review": needs_review}})
-    return {"dimensions": dims, "overall": overall, "needs_review": needs_review}
+    return await apply_override(sub, dim_index, body.override_score, body.override_note, user)

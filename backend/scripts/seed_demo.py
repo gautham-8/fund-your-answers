@@ -25,6 +25,7 @@ from app import db, storage  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.config import DEFAULT_RUBRIC  # noqa: E402
 from app.pipeline import overall_score  # noqa: E402
+from app.schedule import term_for  # noqa: E402
 
 DOMAIN = "@viva.demo"
 
@@ -162,6 +163,7 @@ async def wipe_demo() -> None:
         await storage.delete(f["_id"])
     await db.viva_turns.delete_many({"submission_id": {"$in": sids}})
     await db.scores.delete_many({"submission_id": {"$in": sids}})
+    await db.regrade_requests.delete_many({"submission_id": {"$in": sids}})
     await db.submissions.delete_many({"_id": {"$in": sids}})
     await db.assignments.delete_many({"_id": {"$in": [a["_id"] for a in assignments]}})
     await db.courses.delete_many({"_id": {"$in": [c["_id"] for c in courses]}})
@@ -191,14 +193,24 @@ async def main() -> None:
         })).inserted_id
 
     course_id = (await db.courses.insert_one({
-        "name": "CS 201: Algorithms (Demo)", "instructor_id": inst_id, "join_code": "DEMO" + secrets.choice("ABCDEFGHJKMNPQRSTUVWXYZ") + secrets.choice("23456789"),
+        "name": "Algorithms (Demo)", "code": "CS 201", "term": term_for(now), "instructor_id": inst_id, "join_code": "DEMO" + secrets.choice("ABCDEFGHJKMNPQRSTUVWXYZ") + secrets.choice("23456789"),
         "student_ids": list(student_ids.values()), "created_at": now,
     })).inserted_id
 
     assignment_id = (await db.assignments.insert_one({
-        "course_id": course_id, **ASSIGNMENT, "due_date": now + timedelta(days=7),
-        "rubric": DEFAULT_RUBRIC, "created_at": now,
+        "course_id": course_id, **ASSIGNMENT, "release_date": now - timedelta(days=4),
+        "due_date": now + timedelta(days=7), "late_due_date": now + timedelta(days=9),
+        "grades_published": False, "rubric": DEFAULT_RUBRIC, "created_at": now,
     })).inserted_id
+    # Two more assignments so the course page shows the schedule features.
+    await db.assignments.insert_many([
+        {"course_id": course_id, "title": "Graph Search Write-up", "description": "Compare BFS and Dijkstra on a road network.",
+         "release_date": now - timedelta(days=1), "due_date": now + timedelta(days=14), "late_due_date": None,
+         "grades_published": False, "rubric": DEFAULT_RUBRIC, "created_at": now + timedelta(seconds=1)},
+        {"course_id": course_id, "title": "Dynamic Programming Project", "description": "Released later in the term.",
+         "release_date": now + timedelta(days=10), "due_date": now + timedelta(days=24), "late_due_date": now + timedelta(days=26),
+         "grades_published": False, "rubric": DEFAULT_RUBRIC, "created_at": now + timedelta(seconds=2)},
+    ])
 
     with_audio = 0
     for s in STUDENTS:

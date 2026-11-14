@@ -169,3 +169,94 @@ def test_class_insights(client):
     assert ok(client.get(url, headers=I))["concept_gaps"]["overview"] == "Mixed."
 
     assert client.get(url, headers=students[0]).status_code == 403  # students can't see insights
+
+
+# ---------- course metadata, schedule, grades & regrades ----------
+
+def _iso(**delta):
+    return (datetime.now(timezone.utc) + timedelta(**delta)).isoformat()
+
+
+def test_course_code_term_counts_and_unenroll(client):
+    I, _ = register(client, "Prof", "instructor")
+    course = ok(client.post("/api/courses", json={"name": "Neural Networks", "code": "CS 682", "term": "Fall 2026"}, headers=I))
+    assert course["code"] == "CS 682" and course["term"] == "Fall 2026" and course["instructor_name"] == "Prof"
+    default = ok(client.post("/api/courses", json={"name": "No term"}, headers=I))
+    assert default["term"].split()[0] in ("Spring", "Summer", "Fall")
+    ok(client.patch(f"/api/courses/{course['id']}", json={"code": "COMPSCI 682"}, headers=I))
+
+    S, _ = register(client, "Stu", "student")
+    ok(client.post("/api/courses/join", json={"code": course["join_code"]}, headers=S))
+    ok(client.post(f"/api/courses/{course['id']}/assignments", json={"title": "A1", "due_date": _iso(days=3)}, headers=I))
+    ok(client.post(f"/api/courses/{course['id']}/assignments", json={"title": "Hidden", "release_date": _iso(days=1)}, headers=I))
+
+    mine = ok(client.get("/api/courses", headers=S))
+    assert mine[0]["code"] == "COMPSCI 682" and mine[0]["assignment_count"] == 1 and mine[0]["todo_count"] == 1
+    assert mine[0]["instructor_name"] == "Prof"
+    assert ok(client.get("/api/courses", headers=I))[1]["assignment_count"] == 2
+    assert [u["title"] for u in ok(client.get("/api/upcoming", headers=S))] == ["A1"]
+
+    assert client.delete(f"/api/courses/{course['id']}/enrollment", headers=S).status_code == 204
+    assert ok(client.get("/api/courses", headers=S)) == []
+    assert client.get(f"/api/courses/{course['id']}", headers=S).status_code == 404
+
+
+def test_release_and_late_due_dates(client):
+    I, (S,), course, _ = make_class(client)
+    cid = course["id"]
+    bad = client.post(f"/api/courses/{cid}/assignments", json={"title": "x", "due_date": _iso(days=1), "late_due_date": _iso(hours=1)}, headers=I)
+    assert bad.status_code == 400
+
+    hidden = ok(client.post(f"/api/courses/{cid}/assignments", json={"title": "Later", "release_date": _iso(days=1)}, headers=I))
+    assert "Later" not in [a["title"] for a in ok(client.get(f"/api/courses/{cid}", headers=S))["assignments"]]
+    assert client.get(f"/api/assignments/{hidden['id']}", headers=S).status_code == 404
+    assert client.post(f"/api/assignments/{hidden['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4")}, headers=S).status_code == 404
+    ok(client.patch(f"/api/assignments/{hidden['id']}", json={"release_date": None}, headers=I))
+    assert ok(client.get(f"/api/assignments/{hidden['id']}", headers=S))["released"]
+
+    late = ok(client.post(f"/api/courses/{cid}/assignments", json={"title": "Late ok", "due_date": _iso(hours=-1), "late_due_date": _iso(days=1)}, headers=I))
+    sub = ok(client.post(f"/api/assignments/{late['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4")}, headers=S))
+    view = ok(client.get(f"/api/assignments/{late['id']}", headers=S))
+    assert view["my_submission"]["id"] == sub["id"] and view["my_submission"]["late"]
+
+    ok(client.patch(f"/api/assignments/{late['id']}", json={"late_due_date": _iso(hours=-1, minutes=30)}, headers=I))
+    r = client.post(f"/api/assignments/{late['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4")}, headers=S)
+    assert r.status_code == 400 and "late due date" in r.json()["detail"]
+
+
+def test_publish_grades_and_regrade_requests(client):
+    I, (S, S2), course, asg = make_class(client, n_students=2)
+    sid = run_viva(client, asg, S)
+
+    inst = ok(client.get(f"/api/assignments/{asg['id']}", headers=I))
+    assert [m["name"] for m in inst["missing"]] == ["Stu1"]
+
+    # Unpublished: no scores for the student, no regrades
+    assert ok(client.get(f"/api/assignments/{asg['id']}", headers=S))["my_results"] is None
+    assert client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 0, "message": "pls"}, headers=S).status_code == 400
+
+    ok(client.patch(f"/api/assignments/{asg['id']}", json={"grades_published": True}, headers=I))
+    res = ok(client.get(f"/api/assignments/{asg['id']}", headers=S))["my_results"]
+    assert res["overall"] == 80.0 and res["dimensions"][0]["score"] == 4 and "confidence" not in res["dimensions"][0]
+    assert ok(client.get(f"/api/courses/{course['id']}", headers=S))["assignments"][0]["my_score"] == 80.0
+
+    rr = ok(client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 0, "message": "I explained it"}, headers=S))
+    assert rr["status"] == "open" and rr["score_before"] == 4
+    dup = client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 0, "message": "again"}, headers=S)
+    assert dup.status_code == 409
+    assert client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 0, "message": "x"}, headers=S2).status_code == 404
+
+    lst = ok(client.get(f"/api/courses/{course['id']}/regrade-requests", headers=I))
+    assert lst[0]["student"]["name"] == "Stu0" and lst[0]["assignment"]["title"] == "Sorting"
+    assert ok(client.get(f"/api/courses/{course['id']}/regrade-requests", headers=S2)) == []
+    assert ok(client.get("/api/courses", headers=I))[0]["open_regrades"] == 1
+
+    assert client.patch(f"/api/regrade-requests/{rr['id']}", json={"override_score": 5}, headers=S).status_code == 403
+    done = ok(client.patch(f"/api/regrade-requests/{rr['id']}", json={"override_score": 5, "response": "Fair point"}, headers=I))
+    assert done["status"] == "resolved" and done["score_after"] == 5 and done["resolved_by"] == "Prof"
+    res = ok(client.get(f"/api/submissions/{sid}", headers=S))["results"]
+    assert res["overall"] == 85.0 and res["dimensions"][0]["adjusted"] and res["dimensions"][0]["instructor_note"] == "Fair point"
+    assert client.delete(f"/api/regrade-requests/{rr['id']}", headers=S).status_code == 400  # already resolved
+
+    rr2 = ok(client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 1, "message": "hm"}, headers=S))
+    assert client.delete(f"/api/regrade-requests/{rr2['id']}", headers=S).status_code == 204

@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api } from '../lib/api'
+import Icon from './Icon.vue'
 
 const props = defineProps({ assignmentId: String })
 
@@ -37,11 +38,11 @@ defineExpose({ load })
 </script>
 
 <template>
-  <section v-if="data" class="mt-8 space-y-4">
-    <h2 class="text-lg font-semibold">Class insights</h2>
+  <section v-if="data" class="space-y-4 pt-2">
+    <h2 class="flex items-center gap-2 font-semibold"><Icon name="chart" class="text-indigo-500" />Class insights</h2>
     <p v-if="error" class="error-box">{{ error }}</p>
 
-    <p v-if="!data.completed" class="text-slate-500">Insights appear once students complete their vivas.</p>
+    <p v-if="!data.completed" class="rounded-2xl border border-dashed border-slate-300 bg-white px-5 py-8 text-center text-sm text-slate-500">Insights appear once students complete their vivas.</p>
     <template v-else>
       <!-- Headline numbers -->
       <div class="grid gap-3 sm:grid-cols-3">
@@ -60,9 +61,9 @@ defineExpose({ load })
       </div>
 
       <!-- Rubric + AI vs instructor -->
-      <div class="card overflow-x-auto p-0">
+      <div class="overflow-x-auto rounded-2xl border border-slate-200/80 bg-white shadow-xs">
         <table class="w-full text-left text-sm">
-          <thead class="border-b border-slate-200 bg-slate-50 text-slate-600">
+          <thead class="border-b border-slate-100 bg-slate-50/60 text-xs tracking-wide text-slate-500 uppercase">
             <tr>
               <th class="px-4 py-2 font-medium">Rubric dimension</th>
               <th class="px-4 py-2 font-medium">Avg AI score</th>
@@ -112,7 +113,7 @@ defineExpose({ load })
         <template v-if="data.concept_gaps">
           <p class="text-sm text-slate-700">{{ data.concept_gaps.overview }}</p>
           <p v-if="!data.concept_gaps.gaps.length" class="text-sm text-slate-500">No shared gaps found.</p>
-          <div v-for="g in data.concept_gaps.gaps" :key="g.concept" class="rounded-lg border border-slate-200 p-4">
+          <div v-for="g in data.concept_gaps.gaps" :key="g.concept" class="rounded-xl border border-slate-200 p-4">
             <div class="flex items-start justify-between gap-3">
               <h4 class="font-medium">{{ g.concept }}</h4>
               <span class="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800">

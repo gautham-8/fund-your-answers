@@ -1,28 +1,60 @@
 <script setup>
-import { useRouter } from 'vue-router'
-import { auth, logout } from './lib/auth'
+import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { auth } from './lib/auth'
+import { loadCourses } from './lib/store'
+import AppSidebar from './components/AppSidebar.vue'
+import ConfirmHost from './components/ConfirmHost.vue'
+import Icon from './components/Icon.vue'
+import Toaster from './components/Toaster.vue'
 
-const router = useRouter()
-function signOut() {
-  logout()
-  router.push('/login')
+const route = useRoute()
+const shell = computed(() => !route.meta.guest && !!auth.token)
+
+function readCollapsed() {
+  try {
+    return localStorage.getItem('viva_sidebar') === 'collapsed'
+  } catch {
+    return false
+  }
 }
+const collapsed = ref(readCollapsed())
+const mobileOpen = ref(false)
+
+function toggle() {
+  collapsed.value = !collapsed.value
+  try {
+    localStorage.setItem('viva_sidebar', collapsed.value ? 'collapsed' : 'open')
+  } catch {}
+}
+
+// Load the class list once signed in (and again after signing in as someone else).
+watch(
+  () => auth.token,
+  (token) => token && loadCourses().catch(() => {}),
+  { immediate: true },
+)
+watch(() => route.fullPath, () => (mobileOpen.value = false))
 </script>
 
 <template>
-  <header class="border-b border-slate-200 bg-white">
-    <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
-      <RouterLink to="/" class="text-lg font-bold text-indigo-700">Viva</RouterLink>
-      <div v-if="auth.user" class="flex items-center gap-3 text-sm">
-        <span class="text-slate-600">
-          {{ auth.user.name }}
-          <span class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs capitalize">{{ auth.user.role }}</span>
-        </span>
-        <button class="btn-secondary px-3 py-1" @click="signOut">Sign out</button>
-      </div>
+  <div v-if="shell" class="min-h-screen lg:flex">
+    <AppSidebar :collapsed="collapsed" :mobile-open="mobileOpen" @toggle="toggle" @close="mobileOpen = false" />
+    <div class="min-w-0 flex-1">
+      <header class="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-slate-200/80 bg-white/80 px-4 backdrop-blur lg:hidden">
+        <button class="icon-btn -ml-1" aria-label="Open menu" @click="mobileOpen = true"><Icon name="menu" :size="18" /></button>
+        <RouterLink to="/" class="flex items-center gap-2">
+          <span class="grid size-7 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-xs font-bold text-white">V</span>
+          <span class="font-semibold tracking-tight">Viva</span>
+        </RouterLink>
+      </header>
+      <main class="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
+        <RouterView />
+      </main>
     </div>
-  </header>
-  <main class="mx-auto max-w-5xl px-4 py-6">
-    <RouterView />
-  </main>
+  </div>
+  <RouterView v-else />
+
+  <Toaster />
+  <ConfirmHost />
 </template>
