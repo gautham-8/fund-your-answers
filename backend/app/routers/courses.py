@@ -33,6 +33,7 @@ class AssignmentIn(BaseModel):
     description: str = ""
     due_date: datetime | None = None
     rubric: list[RubricItem] | None = None
+    parts: list[str] = Field(default=[], max_length=30, description="The assignment's own questions, in order")
 
 
 def _course_out(course: dict, user: dict) -> dict:
@@ -123,6 +124,7 @@ async def create_assignment(course_id: str, body: AssignmentIn, user: dict = Dep
         "description": body.description.strip(),
         "due_date": body.due_date,
         "rubric": rubric,
+        "parts": [q.strip()[:2000] for q in body.parts if q.strip()],
         "created_at": db.now(),
     }
     res = await db.assignments.insert_one(doc)

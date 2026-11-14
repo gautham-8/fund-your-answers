@@ -26,20 +26,43 @@ async def run_analysis(submission_id: ObjectId) -> None:
     try:
         pdf_bytes, _, _ = await storage.read(sub["pdf_file_id"])
         analysis = await gemini.analyze_pdf(pdf_bytes, assignment)
-        analysis_dict = analysis.model_dump()
+        analysis_dict = analysis.model_dump(exclude={"page_map"})
         qs = await gemini.generate_questions(analysis_dict, assignment, settings.num_questions)
         questions = [q.model_dump() for q in qs.questions[: settings.num_questions]]
         if not questions:
             raise RuntimeError("No questions generated")
+        parts = assignment.get("parts") or []
+        page_map = match_pages(analysis, len(parts)) if parts else None
         await db.submissions.update_one(
             {"_id": submission_id},
-            {"$set": {"analysis": analysis_dict, "questions": questions, "status": READY, "error": None}},
+            {"$set": {
+                "analysis": analysis_dict, "questions": questions, "page_map": page_map,
+                "page_count": analysis.page_count, "pages_confirmed_at": None, "status": READY, "error": None,
+            }},
         )
     except Exception as e:  # noqa: BLE001 - surface any failure to the UI
         log.exception("Analysis failed for %s", submission_id)
         await db.submissions.update_one(
             {"_id": submission_id}, {"$set": {"status": ANALYSIS_FAILED, "error": str(e)[:500]}}
         )
+
+
+def clean_pages(pages: list[int], page_count: int) -> list[int]:
+    return sorted({p for p in pages if 1 <= p <= page_count})
+
+
+def match_pages(analysis: gemini.PdfAnalysis, n_parts: int) -> list[list[int]]:
+    """AI page guesses as one sorted page list per assignment question, dropping pages outside the PDF."""
+    out: list[list[int]] = [[] for _ in range(n_parts)]
+    for m in analysis.page_map:
+        if 1 <= m.part <= n_parts:
+            out[m.part - 1] = clean_pages(out[m.part - 1] + m.pages, analysis.page_count)
+    return out
+
+
+def pages_pending(sub: dict) -> bool:
+    """True while the student still has to confirm which pages answer each assignment question."""
+    return sub.get("page_map") is not None and sub.get("pages_confirmed_at") is None
 
 
 def current_step(sub: dict, turns: list[dict]) -> dict | None:

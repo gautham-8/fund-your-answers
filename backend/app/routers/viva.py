@@ -21,6 +21,7 @@ async def _state(sub: dict) -> dict:
         "status": sub["status"],
         "error": sub.get("error"),
         "consent_given": sub.get("consent_at") is not None,
+        "pages_pending": pipeline.pages_pending(sub),
         "total_questions": len(sub.get("questions", [])),
         "answered_questions": len({t["question_index"] for t in turns if t["kind"] == "main"}),
         "current": step,
@@ -50,6 +51,8 @@ async def viva_state(submission_id: str, user: dict = Depends(student)):
 @router.post("/submissions/{submission_id}/viva/consent")
 async def give_consent(submission_id: str, user: dict = Depends(student)):
     sub, _, _ = await load_submission(user, submission_id)
+    if pipeline.pages_pending(sub):
+        raise HTTPException(400, "Confirm which pages answer each question first")
     if sub.get("consent_at") is None:
         await db.submissions.update_one({"_id": sub["_id"]}, {"$set": {"consent_at": db.now()}})
         sub["consent_at"] = db.now()

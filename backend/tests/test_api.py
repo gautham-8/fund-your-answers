@@ -140,6 +140,29 @@ def test_full_viva_flow(client, fake_gemini, files_coll):
     assert client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4")}, headers=S).status_code == 409
 
 
+def test_page_matching_must_be_confirmed_before_viva(client):
+    I, (S,), course, _ = make_class(client)
+    asg = ok(client.post(f"/api/courses/{course['id']}/assignments",
+                         json={"title": "HW", "parts": ["Prove it", "  ", "Code it"]}, headers=I))
+    assert asg["parts"] == ["Prove it", "Code it"]
+    sid = ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4")}, headers=S))["id"]
+
+    mine = ok(client.get(f"/api/assignments/{asg['id']}", headers=S))["my_submission"]
+    assert mine["page_map"] == [[1, 2], []] and mine["page_count"] == 3 and mine["pages_pending"]
+    assert client.post(f"/api/submissions/{sid}/viva/consent", headers=S).status_code == 400
+
+    url = f"/api/submissions/{sid}/pages"
+    assert client.put(url, json={"pages": [[1]]}, headers=S).status_code == 400          # one list per question
+    assert client.put(url, json={"pages": [[1], [4]]}, headers=S).status_code == 400     # past the last page
+    assert client.put(url, json={"pages": [[1], [3]]}, headers=I).status_code == 403
+    assert ok(client.put(url, json={"pages": [[2, 1, 2], [3]]}, headers=S))["page_map"] == [[1, 2], [3]]
+
+    assert not ok(client.get(f"/api/submissions/{sid}/viva", headers=S))["pages_pending"]
+    ok(client.post(f"/api/submissions/{sid}/viva/consent", headers=S))
+    rep = ok(client.get(f"/api/submissions/{sid}", headers=I))
+    assert rep["parts"] == ["Prove it", "Code it"] and rep["page_map"] == [[1, 2], [3]] and rep["pages_confirmed_at"]
+
+
 # ---------- class insights ----------
 
 def test_class_insights(client):
