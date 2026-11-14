@@ -69,8 +69,9 @@ async function rescore() {
   await load()
 }
 
-async function openPdf() {
-  window.open(await blobUrl(`/api/submissions/${props.id}/pdf`), '_blank')
+async function openPdf(page) {
+  const url = await blobUrl(`/api/submissions/${props.id}/pdf`)
+  window.open(page ? `${url}#page=${page}` : url, '_blank')
 }
 
 const openRegrades = computed(() => (sub.value?.regrade_requests || []).filter((r) => r.status === 'open'))
@@ -117,7 +118,7 @@ onUnmounted(() => {
           <span class="text-xs text-slate-400">Submitted {{ fmtDate(sub.created_at) }}</span>
         </div>
       </div>
-      <button class="btn-secondary" @click="openPdf"><Icon name="file" />{{ sub.filename }}<Icon name="external" :size="13" class="text-slate-400" /></button>
+      <button class="btn-secondary" @click="openPdf()"><Icon name="file" />{{ sub.filename }}<Icon name="external" :size="13" class="text-slate-400" /></button>
       <ScoreRing v-if="sub.score" :value="sub.overall" :size="88" label="Score" />
     </header>
 
@@ -230,6 +231,32 @@ onUnmounted(() => {
     </div>
 
     <!-- Transcript -->
+    <section v-if="sub.page_map" class="mt-10">
+      <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <h2 class="text-lg font-semibold tracking-tight">Answer pages</h2>
+        <p class="text-xs text-slate-500">
+          {{ sub.pages_confirmed_at ? `Confirmed by the student ${fmtDate(sub.pages_confirmed_at)}` : 'AI match, not yet confirmed by the student' }}
+        </p>
+      </div>
+      <div class="card divide-y divide-slate-100 p-0 text-sm">
+        <div v-for="(q, i) in sub.parts" :key="i" class="flex flex-wrap items-baseline gap-2 px-4 py-3">
+          <span class="font-medium">Q{{ i + 1 }}.</span>
+          <span class="min-w-0 flex-1 text-slate-700">{{ q }}</span>
+          <span class="flex flex-wrap gap-1">
+            <button
+              v-for="p in sub.page_map[i]"
+              :key="p"
+              class="rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+              @click="openPdf(p)"
+            >
+              p. {{ p }}
+            </button>
+            <span v-if="!sub.page_map[i]?.length" class="text-xs text-orange-600">No pages</span>
+          </span>
+        </div>
+      </div>
+    </section>
+
     <section v-if="sub.questions.length" class="mt-10">
       <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h2 class="text-lg font-semibold tracking-tight">Viva transcript</h2>

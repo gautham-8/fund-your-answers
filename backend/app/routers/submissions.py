@@ -101,7 +101,12 @@ async def get_assignment(assignment_id: str, user: dict = Depends(current_user))
 
     if user["role"] == "student":
         sub = await db.submissions.find_one({"assignment_id": assignment["_id"], "student_id": user["_id"]})
-        out["my_submission"] = _sub_summary(sub) if sub else None
+        out["my_submission"] = {
+            **_sub_summary(sub),
+            "page_map": sub.get("page_map"),
+            "page_count": sub.get("page_count"),
+            "pages_pending": pipeline.pages_pending(sub),
+        } if sub else None
         if sub:
             results = await student_results(sub, assignment)
             if results:
@@ -164,6 +169,8 @@ async def upload_submission(
         "status": pipeline.ANALYZING,
         "analysis": None,
         "questions": [],
+        "page_map": None,
+        "pages_confirmed_at": None,
         "consent_at": None,
         "error": None,
         "late": schedule.is_late(assignment, now),
@@ -208,6 +215,9 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
         "student": {"name": stu["name"], "email": stu["email"]} if stu else None,
         "analysis": sub.get("analysis"),
         "questions": sub.get("questions", []),
+        "parts": assignment.get("parts") or [],
+        "page_map": sub.get("page_map"),
+        "pages_confirmed_at": sub.get("pages_confirmed_at"),
         "consent_at": sub.get("consent_at"),
         "rubric": assignment["rubric"],
         "turns": [
@@ -232,6 +242,28 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
         ],
     })
     return out
+
+
+class PagesIn(BaseModel):
+    pages: list[list[int]] = Field(description="Pages for each assignment question, in order")
+
+
+@router.put("/submissions/{submission_id}/pages")
+async def confirm_pages(submission_id: str, body: PagesIn, user: dict = Depends(student)):
+    """The student checks (and fixes) the AI's page matches, which submits them and opens the viva."""
+    sub, _, _ = await load_submission(user, submission_id)
+    if sub["status"] != pipeline.READY or sub.get("page_map") is None:
+        raise HTTPException(400, "Pages can only be set after analysis and before the viva starts")
+    if len(body.pages) != len(sub["page_map"]):
+        raise HTTPException(400, "Give pages for every question")
+    page_count = sub.get("page_count") or 0
+    if any(not 1 <= p <= page_count for pages in body.pages for p in pages):
+        raise HTTPException(400, f"Pages must be between 1 and {page_count}")
+    page_map = [pipeline.clean_pages(pages, page_count) for pages in body.pages]
+    await db.submissions.update_one(
+        {"_id": sub["_id"]}, {"$set": {"page_map": page_map, "pages_confirmed_at": db.now()}}
+    )
+    return {"page_map": page_map, "pages_pending": False}
 
 
 @router.get("/submissions/{submission_id}/pdf")

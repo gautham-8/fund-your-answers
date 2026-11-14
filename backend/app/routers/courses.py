@@ -46,6 +46,7 @@ class AssignmentIn(BaseModel):
     due_date: datetime | None = None
     late_due_date: datetime | None = None
     rubric: list[RubricItem] | None = None
+    parts: list[str] = Field(default=[], max_length=30, description="The assignment's own questions, in order")
 
 
 class AssignmentPatch(BaseModel):
@@ -298,6 +299,7 @@ async def create_assignment(course_id: str, body: AssignmentIn, user: dict = Dep
         "late_due_date": body.late_due_date,
         "grades_published": False,
         "rubric": rubric,
+        "parts": [q.strip()[:2000] for q in body.parts if q.strip()],
         "created_at": db.now(),
     }
     res = await db.assignments.insert_one(doc)

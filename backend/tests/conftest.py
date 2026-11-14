@@ -45,8 +45,11 @@ class FakeGemini:
         self.eval_calls = []
 
     async def analyze_pdf(self, pdf, assignment):
+        # Q1 on pages 1-2, Q2 not found, plus junk the server must drop (page 9 > page_count, part 7 doesn't exist)
+        page_map = [gemini.PageMatch(part=1, pages=[2, 1, 9]), gemini.PageMatch(part=7, pages=[3])]
         return gemini.PdfAnalysis(summary="Uses quicksort.", embedded_instructions_detected=False, items=[
-            gemini.AnalysisItem(kind="method", name="Quicksort", description="sorts", page=2, excerpt="we use quicksort")])
+            gemini.AnalysisItem(kind="method", name="Quicksort", description="sorts", page=2, excerpt="we use quicksort")],
+            page_count=3, page_map=page_map if assignment.get("parts") else [])
 
     async def generate_questions(self, analysis, assignment, n):
         return gemini.QuestionSet(questions=[

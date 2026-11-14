@@ -33,6 +33,7 @@ watch(
       due_date: toLocalInput(a?.due_date),
       late_due_date: toLocalInput(a?.late_due_date),
       rubric: DEFAULT_RUBRIC.map((r) => ({ ...r })),
+      parts: [],
     })
   },
   { immediate: true },
@@ -72,7 +73,7 @@ async function submit() {
       ? await api(`/api/assignments/${props.assignment.id}`, { method: 'PATCH', body })
       : await api(`/api/courses/${props.courseId}/assignments`, {
           method: 'POST',
-          body: { ...body, rubric: form.rubric.filter((r) => r.name.trim()) },
+          body: { ...body, rubric: form.rubric.filter((r) => r.name.trim()), parts: form.parts.filter((q) => q.trim()) },
         })
     emit('saved', saved)
   } catch (e) {
@@ -126,6 +127,19 @@ async function submit() {
       </fieldset>
 
       <div v-if="!assignment">
+        <span class="label">Questions <span class="font-normal text-slate-400">(optional)</span></span>
+        <p class="hint mb-2">The AI finds the pages that answer each one, and students confirm them when they submit.</p>
+        <div class="space-y-2">
+          <div v-for="(q, i) in form.parts" :key="i" class="flex gap-2">
+            <span class="w-8 shrink-0 pt-2 text-sm text-slate-500">Q{{ i + 1 }}</span>
+            <textarea v-model="form.parts[i]" class="input" rows="1" placeholder="Question text" :aria-label="`Question ${i + 1}`"></textarea>
+            <button type="button" class="icon-btn size-9 shrink-0" title="Remove" @click="form.parts.splice(i, 1)"><Icon name="trash" :size="15" /></button>
+          </div>
+        </div>
+        <button type="button" class="btn-ghost btn-sm mt-2 -ml-1" @click="form.parts.push('')"><Icon name="plus" :size="14" />Add question</button>
+      </div>
+
+      <div v-if="!assignment">
         <span class="label">Rubric <span class="font-normal text-slate-400">· each dimension is scored 1–5</span></span>
         <div class="space-y-2">
           <div v-for="(r, i) in form.rubric" :key="i" class="flex gap-2">
@@ -136,7 +150,7 @@ async function submit() {
         </div>
         <button type="button" class="btn-ghost btn-sm mt-2 -ml-1" @click="form.rubric.push({ name: '', description: '' })"><Icon name="plus" :size="14" />Add dimension</button>
       </div>
-      <p v-else class="flex items-center gap-2 text-xs text-slate-500"><Icon name="lock" :size="13" />The rubric is fixed once an assignment is created, so scores stay comparable.</p>
+      <p v-else class="flex items-center gap-2 text-xs text-slate-500"><Icon name="lock" :size="13" />The rubric and questions are fixed once an assignment is created, so scores and page matches stay comparable.</p>
 
       <p v-if="error" class="error-box">{{ error }}</p>
     </form>
