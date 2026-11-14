@@ -1,0 +1,29 @@
+# Render Blueprint: one free web service running the Docker image (API + frontend).
+services:
+  - type: web
+    name: viva
+    runtime: docker
+    plan: free
+    region: singapore # closest Render region to the Atlas cluster (Mumbai)
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Secrets: Render asks for these when the Blueprint is created. Never commit them.
+      - key: MONGODB_URI
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Render generates a random value once and keeps it.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGODB_DB
+        value: viva
+      - key: GEMINI_ANALYSIS_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_VIVA_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_SCORING_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_TIMEOUT_SECONDS
+        value: "60"

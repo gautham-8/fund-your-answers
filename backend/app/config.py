@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     gemini_timeout_seconds: int = 60
 
     cors_origins: str = "http://localhost:5173"
+    # Folder with the built frontend (set in the Docker image); empty = don't serve it.
+    static_dir: str = ""
 
     max_pdf_mb: int = 20
     max_audio_mb: int = 15
