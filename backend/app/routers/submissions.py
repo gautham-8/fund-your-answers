@@ -206,6 +206,12 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
         results = await student_results(sub, assignment)
         if results:
             out["results"] = results
+        out.update({
+            "parts": assignment.get("parts") or [],
+            "page_map": sub.get("page_map"),
+            "page_count": sub.get("page_count"),
+            "pages_pending": pipeline.pages_pending(sub),
+        })
         return out
 
     stu = await db.users.find_one({"_id": sub["student_id"]})
