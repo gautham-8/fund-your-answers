@@ -17,6 +17,8 @@ minute to wake up).
 - **Assignments** — title, description, due date (submissions close after it), editable rubric
   (default: Accuracy, Reasoning depth, Specificity, Clarity).
 - **PDF analysis** — on upload, Gemini lists methods and decisions with page numbers, then writes 4 questions.
+- **Answer pages** — instructors can list the assignment's questions. The same Gemini call picks the PDF pages that
+  answer each one; the student checks and fixes the pages, then confirms before the viva opens. The report shows them.
 - **Voice viva** — consent notice first; record (or type) each answer. Gemini transcribes and judges in one call and
   asks at most one follow-up per question, based on the actual answer.
 - **Scoring** — each rubric dimension gets a 1–5 score, an exact quote as evidence and a confidence. The server checks
@@ -44,7 +46,7 @@ FastAPI (one Docker container on Render; also serves the built frontend)
 | Collection | Holds |
 |---|---|
 | `users`, `courses`, `assignments` | accounts (bcrypt hashes), classes + join codes + roster, assignments + rubric + cached class gaps |
-| `submissions` | status, PDF analysis, the 4 questions, consent time, overall score |
+| `submissions` | status, PDF analysis, the 4 questions, answer pages per assignment question, consent time, overall score |
 | `viva_turns` | question, transcript, quality notes, follow-up, link to the audio file |
 | `scores` | per-dimension score, evidence quote, confidence, overrides |
 | `files.files` / `files.chunks` | GridFS: uploaded PDFs and compressed recordings |
