@@ -21,7 +21,7 @@ const busy = ref(false)
 const form = reactive(blankForm())
 
 function blankForm() {
-  return { title: '', description: '', due_date: '', parts: [], rubric: DEFAULT_RUBRIC.map((r) => ({ ...r })) }
+  return { title: '', description: '', due_date: '', rubric: DEFAULT_RUBRIC.map((r) => ({ ...r })) }
 }
 
 async function load() {
@@ -43,7 +43,6 @@ async function createAssignment() {
         description: form.description,
         due_date: form.due_date ? new Date(form.due_date).toISOString() : null,
         rubric: form.rubric.filter((r) => r.name.trim()),
-        parts: form.parts.filter((q) => q.trim()),
       },
     })
     Object.assign(form, blankForm())
@@ -93,16 +92,6 @@ onMounted(load)
       <div>
         <label class="label">Due date</label>
         <input v-model="form.due_date" type="datetime-local" class="input sm:w-auto" />
-      </div>
-      <div>
-        <label class="label">Questions (optional)</label>
-        <p class="mb-2 text-xs text-slate-500">The AI finds the pages that answer each one, and students confirm them when they submit.</p>
-        <div v-for="(q, i) in form.parts" :key="i" class="mb-2 flex gap-2">
-          <span class="w-8 shrink-0 pt-2 text-sm text-slate-500">Q{{ i + 1 }}</span>
-          <textarea v-model="form.parts[i]" class="input" rows="1" placeholder="Question text"></textarea>
-          <button type="button" class="btn-secondary px-3" title="Remove" @click="form.parts.splice(i, 1)">✕</button>
-        </div>
-        <button type="button" class="text-sm text-indigo-600 hover:underline" @click="form.parts.push('')">+ Add question</button>
       </div>
       <div>
         <label class="label">Rubric (each dimension is scored 1–5)</label>

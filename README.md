@@ -13,9 +13,14 @@ minute to wake up).
 
 ## Features
 
-- **Classes** — instructors create a class and get a 6-character join code; students join with it. Instructors see the roster.
-- **Assignments** — title, description, due date (submissions close after it), editable rubric
-  (default: Accuracy, Reasoning depth, Specificity, Clarity).
+- **Classes** — course code, name and term (dashboard groups classes by term). Instructors get a 6-character join code
+  (click to copy) and a one-click invite link (`/join/CODE`); they can manage the roster. Students can unenroll.
+- **Assignments** — title, description, rubric, and a schedule: **release date** (hidden from students until then),
+  **due date**, and optional **late due date** (submissions in between are accepted and marked *Late*). Sortable
+  assignment table with time-left bars, and an "Up next" list of deadlines across classes.
+- **Grades & regrades** — instructors publish grades per assignment; students then see their score, feedback and
+  instructor notes, and can request a regrade on any rubric item. Instructors resolve requests (optionally changing
+  the score) from the class's *Regrade requests* page.
 - **PDF analysis** — on upload, Gemini lists methods and decisions with page numbers, then writes 4 questions.
 - **Answer pages** — instructors can list the assignment's questions. The same Gemini call picks the PDF pages that
   answer each one; the student checks and fixes the pages, then confirms before the viva opens. The report shows them.
@@ -28,7 +33,7 @@ minute to wake up).
   "concepts the class struggled to explain" (anonymised before it is sent to Gemini).
 
 Safeguards: the PDF and answers are treated as untrusted data (prompt-injection attempts are ignored and flagged);
-accent, pauses and phrasing are not judged; API keys stay on the server; students see progress, not scores;
+accent, pauses and phrasing are not judged; API keys stay on the server; students see progress, not scores, until grades are published;
 login is rate-limited (5 failures per 15 minutes).
 
 ## How it fits together
@@ -49,6 +54,7 @@ FastAPI (one Docker container on Render; also serves the built frontend)
 | `submissions` | status, PDF analysis, the 4 questions, answer pages per assignment question, consent time, overall score |
 | `viva_turns` | question, transcript, quality notes, follow-up, link to the audio file |
 | `scores` | per-dimension score, evidence quote, confidence, overrides |
+| `regrade_requests` | student's message about one rubric item, status, instructor response, score before/after |
 | `files.files` / `files.chunks` | GridFS: uploaded PDFs and compressed recordings |
 
 Submission status: `analyzing → ready → viva_in_progress → scoring → completed` (or `analysis_failed` /

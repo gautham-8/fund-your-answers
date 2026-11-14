@@ -2,7 +2,7 @@
 
 from fastapi import HTTPException
 
-from . import db
+from . import db, schedule
 
 
 def _is_instructor_of(user: dict, course: dict) -> bool:
@@ -25,6 +25,9 @@ async def load_assignment(user: dict, assignment_id: str) -> tuple[dict, dict]:
     if not assignment:
         raise HTTPException(404, "Assignment not found")
     course = await load_course(user, str(assignment["course_id"]))
+    # Students can't see an assignment before its release date.
+    if user["role"] == "student" and not schedule.is_released(assignment, db.now()):
+        raise HTTPException(404, "Assignment not found")
     return assignment, course
 
 
