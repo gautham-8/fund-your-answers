@@ -1,10 +1,9 @@
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
 from pymongo.errors import DuplicateKeyError
 
-from .. import db, gemini, pipeline
+from .. import db, gemini, pipeline, storage
 from ..access import load_submission
 from ..auth import current_user, student
 from ..config import settings
@@ -77,7 +76,7 @@ async def answer(
     if not step or step["question_index"] != question_index or step["kind"] != kind:
         raise HTTPException(409, "That question has already been answered; refresh to continue")
 
-    audio_bytes, audio_mime, audio_path = None, None, None
+    audio_bytes, audio_mime = None, None
     if audio is not None:
         audio_bytes = await audio.read()
         if len(audio_bytes) > settings.max_audio_mb * 1024 * 1024:
@@ -85,11 +84,6 @@ async def answer(
         if len(audio_bytes) < 1000:
             raise HTTPException(400, "Recording is empty; please try again")
         audio_mime = (audio.content_type or "audio/wav").split(";")[0]
-        ext = AUDIO_EXT.get(audio_mime, "bin")
-        folder = settings.upload_path / str(sub["_id"])
-        folder.mkdir(parents=True, exist_ok=True)
-        audio_path = folder / f"q{question_index + 1}_{kind}.{ext}"
-        audio_path.write_bytes(audio_bytes)
     elif not (text and text.strip()):
         raise HTTPException(400, "Record an answer or type one")
 
@@ -106,6 +100,17 @@ async def answer(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Could not process the answer, please try again ({str(e)[:200]})")
 
+    # Store the recording only once the answer was processed, so failed attempts leave nothing behind.
+    audio_file_id = None
+    if audio_bytes:
+        audio_file_id = await storage.save(
+            audio_bytes,
+            f"q{question_index + 1}_{kind}.{AUDIO_EXT.get(audio_mime, 'bin')}",
+            audio_mime,
+            kind="viva_audio",
+            submission_id=sub["_id"],
+        )
+
     turn = {
         "submission_id": sub["_id"],
         "question_index": question_index,
@@ -113,7 +118,7 @@ async def answer(
         "question": step["question"],
         "transcript": ev.transcript.strip(),
         "answer_mode": "voice" if audio_bytes else "typed",
-        "audio_path": str(audio_path) if audio_path else None,
+        "audio_file_id": audio_file_id,
         "quality": ev.quality,
         "notes": ev.notes,
         "followup_question": ev.followup_question.strip() if kind == "main" else "",
@@ -122,6 +127,7 @@ async def answer(
     try:
         await db.viva_turns.insert_one(turn)
     except DuplicateKeyError:
+        await storage.delete(audio_file_id)
         raise HTTPException(409, "That question has already been answered; refresh to continue")
 
     turns.append(turn)
@@ -141,7 +147,7 @@ async def answer(
 @router.get("/turns/{turn_id}/audio")
 async def turn_audio(turn_id: str, user: dict = Depends(current_user)):
     turn = await db.viva_turns.find_one({"_id": db.oid(turn_id)})
-    if not turn or not turn.get("audio_path"):
+    if not turn or not turn.get("audio_file_id"):
         raise HTTPException(404, "No audio")
     await load_submission(user, str(turn["submission_id"]))  # access check
-    return FileResponse(turn["audio_path"])
+    return await storage.file_response(turn["audio_file_id"])

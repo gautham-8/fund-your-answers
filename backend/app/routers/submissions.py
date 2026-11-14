@@ -1,8 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .. import db, pipeline
+from .. import db, pipeline, storage
 from ..access import load_assignment, load_submission
 from ..auth import current_user, instructor, student
 from ..config import settings
@@ -79,15 +78,15 @@ async def upload_submission(
     }
     if existing:
         sub_id = existing["_id"]
+        await storage.delete(existing.get("pdf_file_id"))  # replacing the PDF
         await db.submissions.update_one({"_id": sub_id}, {"$set": doc})
     else:
         sub_id = (await db.submissions.insert_one(doc)).inserted_id
 
-    folder = settings.upload_path / str(sub_id)
-    folder.mkdir(parents=True, exist_ok=True)
-    pdf_path = folder / "submission.pdf"
-    pdf_path.write_bytes(data)
-    await db.submissions.update_one({"_id": sub_id}, {"$set": {"pdf_path": str(pdf_path)}})
+    pdf_file_id = await storage.save(
+        data, doc["filename"], "application/pdf", kind="submission_pdf", submission_id=sub_id
+    )
+    await db.submissions.update_one({"_id": sub_id}, {"$set": {"pdf_file_id": pdf_file_id}})
 
     background.add_task(pipeline.run_analysis, sub_id)
     return {"id": str(sub_id), "status": pipeline.ANALYZING}
@@ -123,7 +122,7 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
                 "question": t["question"],
                 "transcript": t.get("transcript", ""),
                 "answer_mode": t.get("answer_mode"),
-                "has_audio": bool(t.get("audio_path")),
+                "has_audio": bool(t.get("audio_file_id")),
                 "quality": t.get("quality"),
                 "notes": t.get("notes"),
             }
@@ -137,9 +136,7 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
 @router.get("/submissions/{submission_id}/pdf")
 async def get_pdf(submission_id: str, user: dict = Depends(current_user)):
     sub, _, _ = await load_submission(user, submission_id)
-    if not sub.get("pdf_path"):
-        raise HTTPException(404, "No PDF")
-    return FileResponse(sub["pdf_path"], media_type="application/pdf", filename=sub.get("filename"))
+    return await storage.file_response(sub.get("pdf_file_id"))
 
 
 @router.post("/submissions/{submission_id}/retry")

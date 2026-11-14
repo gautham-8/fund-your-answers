@@ -2,11 +2,10 @@
 
 import logging
 import re
-from pathlib import Path
 
 from bson import ObjectId
 
-from . import db, gemini
+from . import db, gemini, storage
 from .config import settings
 
 log = logging.getLogger("viva.pipeline")
@@ -25,7 +24,7 @@ async def run_analysis(submission_id: ObjectId) -> None:
     sub = await db.submissions.find_one({"_id": submission_id})
     assignment = await db.assignments.find_one({"_id": sub["assignment_id"]})
     try:
-        pdf_bytes = Path(sub["pdf_path"]).read_bytes()
+        pdf_bytes, _, _ = await storage.read(sub["pdf_file_id"])
         analysis = await gemini.analyze_pdf(pdf_bytes, assignment)
         analysis_dict = analysis.model_dump()
         qs = await gemini.generate_questions(analysis_dict, assignment, settings.num_questions)

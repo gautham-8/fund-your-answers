@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +19,6 @@ class Settings(BaseSettings):
     # Per-model wait before moving to the next model.
     gemini_timeout_seconds: int = 60
 
-    upload_dir: str = "uploads"
     cors_origins: str = "http://localhost:5173"
 
     max_pdf_mb: int = 20
@@ -29,12 +26,6 @@ class Settings(BaseSettings):
     num_questions: int = 4
     # Below this confidence (0-1) a rubric score is flagged "needs review".
     review_confidence_threshold: float = 0.6
-
-    @property
-    def upload_path(self) -> Path:
-        p = Path(self.upload_dir).resolve()
-        p.mkdir(parents=True, exist_ok=True)
-        return p
 
 
 settings = Settings()
