@@ -126,6 +126,10 @@ onUnmounted(() => {
         We couldn't analyze your PDF. Go back to the assignment to retry or upload again.
       </div>
 
+      <div v-else-if="state.pages_pending" class="card">
+        First confirm which pages answer each question on the assignment page, then come back to start the viva.
+      </div>
+
       <!-- Consent -->
       <div v-else-if="!state.consent_given && current" class="card space-y-4">
         <h1 class="text-xl font-bold">Before you start</h1>

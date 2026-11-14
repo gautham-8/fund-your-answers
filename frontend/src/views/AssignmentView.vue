@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api } from '../lib/api'
+import { api, blobUrl } from '../lib/api'
 import { auth } from '../lib/auth'
 import StatusBadge from '../components/StatusBadge.vue'
 import ClassInsights from '../components/ClassInsights.vue'
@@ -12,6 +12,8 @@ const a = ref(null)
 const error = ref('')
 const file = ref(null)
 const uploading = ref(false)
+const pages = ref([]) // student's edited copy of my_submission.page_map
+const savingPages = ref(false)
 let timer = null
 
 const mySub = computed(() => a.value?.my_submission)
@@ -20,6 +22,7 @@ const pending = (s) => s === 'analyzing' || s === 'scoring'
 async function load() {
   try {
     a.value = await api(`/api/assignments/${props.id}`)
+    pages.value = (a.value.my_submission?.page_map || []).map((p) => [...p])
   } catch (e) {
     error.value = e.message
   }
@@ -44,6 +47,30 @@ async function upload() {
   } finally {
     uploading.value = false
   }
+}
+
+function togglePage(i, page) {
+  const list = pages.value[i]
+  const at = list.indexOf(page)
+  if (at >= 0) list.splice(at, 1)
+  else list.push(page)
+}
+
+async function confirmPages() {
+  savingPages.value = true
+  error.value = ''
+  try {
+    await api(`/api/submissions/${mySub.value.id}/pages`, { method: 'PUT', body: { pages: pages.value } })
+    await load()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    savingPages.value = false
+  }
+}
+
+async function openPdf() {
+  window.open(await blobUrl(`/api/submissions/${mySub.value.id}/pdf`), '_blank')
 }
 
 async function retry(subId) {
@@ -76,6 +103,10 @@ onUnmounted(() => clearTimeout(timer))
     </p>
     <p v-if="a.description" class="mt-3 whitespace-pre-line text-slate-700">{{ a.description }}</p>
 
+    <ol v-if="a.parts?.length" class="mt-3 list-decimal space-y-1 pl-5 text-slate-700">
+      <li v-for="(q, i) in a.parts" :key="i" class="whitespace-pre-line">{{ q }}</li>
+    </ol>
+
     <details class="mt-3 text-sm text-slate-600">
       <summary class="cursor-pointer">Rubric</summary>
       <ul class="mt-2 list-disc pl-5">
@@ -100,7 +131,36 @@ onUnmounted(() => clearTimeout(timer))
         or upload a different file.
         <div v-if="mySub.error" class="mt-1 text-xs opacity-80">{{ mySub.error }}</div>
       </div>
-      <div v-if="mySub?.status === 'ready' || mySub?.status === 'viva_in_progress'" class="rounded-lg bg-indigo-50 p-4">
+      <div v-if="mySub?.status === 'ready' && mySub.pages_pending" class="space-y-4 rounded-lg bg-indigo-50 p-4">
+        <div class="flex flex-wrap items-start justify-between gap-2">
+          <p class="text-sm text-indigo-900">
+            We matched your PDF pages to each question. Check them, click a page to add or remove it, then submit.
+          </p>
+          <button class="btn-secondary" @click="openPdf">View my PDF</button>
+        </div>
+        <div v-for="(q, i) in a.parts" :key="i">
+          <p class="mb-1 text-sm font-medium text-slate-800">Q{{ i + 1 }}. {{ q }}</p>
+          <div class="flex flex-wrap gap-1">
+            <button
+              v-for="p in mySub.page_count"
+              :key="p"
+              type="button"
+              class="h-8 min-w-8 rounded border px-2 text-sm"
+              :class="pages[i].includes(p) ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-300 bg-white text-slate-700 hover:border-indigo-400'"
+              :aria-pressed="pages[i].includes(p)"
+              :title="`Page ${p}`"
+              @click="togglePage(i, p)"
+            >
+              {{ p }}
+            </button>
+          </div>
+          <p v-if="!pages[i].length" class="mt-1 text-xs text-amber-700">No pages selected. Leave it empty only if you didn't answer this question.</p>
+        </div>
+        <button class="btn-primary" :disabled="savingPages" @click="confirmPages">
+          {{ savingPages ? 'Submitting…' : 'Confirm pages and submit' }}
+        </button>
+      </div>
+      <div v-if="(mySub?.status === 'ready' && !mySub.pages_pending) || mySub?.status === 'viva_in_progress'" class="rounded-lg bg-indigo-50 p-4">
         <p class="mb-3 text-sm text-indigo-900">
           Your viva is ready: {{ mySub.status === 'ready' ? 'a few' : 'the remaining' }} short spoken questions about your own work.
           Find a quiet spot; it takes about 5–10 minutes.

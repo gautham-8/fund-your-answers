@@ -53,8 +53,9 @@ async function rescore() {
   await load()
 }
 
-async function openPdf() {
-  window.open(await blobUrl(`/api/submissions/${props.id}/pdf`), '_blank')
+async function openPdf(page) {
+  const url = await blobUrl(`/api/submissions/${props.id}/pdf`)
+  window.open(page ? `${url}#page=${page}` : url, '_blank')
 }
 
 const turnsFor = (i) => sub.value.turns.filter((t) => t.question_index === i)
@@ -79,7 +80,7 @@ onUnmounted(() => {
         <div class="mt-2"><StatusBadge :status="sub.status" :needs-review="sub.needs_review" /></div>
       </div>
       <div class="flex items-center gap-3">
-        <button class="btn-secondary" @click="openPdf">View PDF</button>
+        <button class="btn-secondary" @click="openPdf()">View PDF</button>
         <div v-if="sub.score" class="card py-3 text-center">
           <div class="text-xs text-slate-500">Understanding score</div>
           <div class="text-3xl font-bold text-indigo-700">{{ sub.overall }}%</div>
@@ -144,6 +145,30 @@ onUnmounted(() => {
     <div v-else-if="sub.status === 'scoring'" class="card mb-8 text-slate-600">Scoring in progress…</div>
 
     <!-- Transcript -->
+    <section v-if="sub.page_map" class="mb-8">
+      <h2 class="mb-1 text-lg font-semibold">Answer pages</h2>
+      <p class="mb-3 text-sm text-slate-500">
+        {{ sub.pages_confirmed_at ? `Confirmed by the student ${new Date(sub.pages_confirmed_at).toLocaleString()}.` : 'AI match, not yet confirmed by the student.' }}
+      </p>
+      <div class="card space-y-2 text-sm">
+        <div v-for="(q, i) in sub.parts" :key="i" class="flex flex-wrap items-baseline gap-2">
+          <span class="font-medium">Q{{ i + 1 }}.</span>
+          <span class="text-slate-700">{{ q }}</span>
+          <span class="ml-auto flex gap-1">
+            <button
+              v-for="p in sub.page_map[i]"
+              :key="p"
+              class="rounded bg-indigo-50 px-2 py-0.5 text-indigo-700 hover:bg-indigo-100"
+              @click="openPdf(p)"
+            >
+              p. {{ p }}
+            </button>
+            <span v-if="!sub.page_map[i]?.length" class="text-amber-700">No pages</span>
+          </span>
+        </div>
+      </div>
+    </section>
+
     <section v-if="sub.questions.length" class="mb-8">
       <h2 class="mb-3 text-lg font-semibold">Viva transcript</h2>
       <p v-if="sub.consent_at" class="mb-3 text-xs text-slate-500">Recording consent given {{ new Date(sub.consent_at).toLocaleString() }}</p>
