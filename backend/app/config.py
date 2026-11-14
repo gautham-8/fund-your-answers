@@ -1,0 +1,47 @@
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    mongodb_uri: str = "mongodb://localhost:27017"
+    mongodb_db: str = "viva"
+
+    jwt_secret: str = "change-me"
+    jwt_expire_hours: int = 72
+
+    gemini_api_key: str = ""
+    gemini_analysis_model: str = "gemini-3.5-flash-lite"
+    gemini_viva_model: str = "gemini-3.5-flash-lite"
+    gemini_scoring_model: str = "gemini-3.5-flash-lite"
+    # Tried in order when the main model is overloaded (503/429) or times out.
+    gemini_fallback_models: str = ""
+    # Per-model wait before moving to the next model.
+    gemini_timeout_seconds: int = 60
+
+    upload_dir: str = "uploads"
+    cors_origins: str = "http://localhost:5173"
+
+    max_pdf_mb: int = 20
+    max_audio_mb: int = 15
+    num_questions: int = 4
+    # Below this confidence (0-1) a rubric score is flagged "needs review".
+    review_confidence_threshold: float = 0.6
+
+    @property
+    def upload_path(self) -> Path:
+        p = Path(self.upload_dir).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+
+settings = Settings()
+
+DEFAULT_RUBRIC = [
+    {"name": "Accuracy", "description": "Are the student's explanations technically correct?"},
+    {"name": "Reasoning depth", "description": "Does the student explain why they made their choices, not just what they did?"},
+    {"name": "Specificity", "description": "Does the student refer to concrete details of their own work?"},
+    {"name": "Clarity", "description": "Is the explanation coherent and easy to follow? (Judge content, not accent or fluency.)"},
+]

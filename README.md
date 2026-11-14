@@ -40,3 +40,40 @@ Day 3: polish, demo data, README.
 
 ## Stretch (only if time remains)
 Class-level concept gaps (aggregate what the whole class couldn't explain), a check of LLM scores against human scores, streaming voice with the Gemini Live API.
+---
+
+## Running locally
+
+**1. Database** — either start local MongoDB (`brew services start mongodb-community`) or put your Atlas connection string in `backend/.env` as `MONGODB_URI`.
+
+**2. Backend** (terminal 1)
+```bash
+cd backend
+# first time only: put your Gemini key in .env  (GEMINI_API_KEY=...)
+#   uv venv .venv && uv pip install -p .venv -r requirements.txt
+.venv/bin/uvicorn app.main:app --reload --port 8000
+```
+
+**3. Frontend** (terminal 2)
+```bash
+cd frontend
+npm install   # first time only
+npm run dev
+```
+Open http://localhost:5173. The mic works on localhost without HTTPS.
+
+### Project layout
+```
+backend/app/
+  main.py          FastAPI app + routers
+  config.py        settings from .env, default rubric
+  db.py            MongoDB collections + helpers
+  auth.py          bcrypt passwords, JWT, role checks
+  access.py        "can this user see this?" checks
+  gemini.py        all prompts + structured-output schemas
+  pipeline.py      background PDF analysis, viva progress, scoring
+  routers/         auth, courses+assignments, submissions+reports, viva
+frontend/src/
+  views/           Login, Dashboard, Course, Assignment, Viva (student), Report (instructor)
+  lib/recorder.js  MediaRecorder -> 16 kHz WAV
+```
