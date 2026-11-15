@@ -6,7 +6,10 @@ import Icon from '../components/Icon.vue'
 
 const props = defineProps({ id: String })
 const MAX_SECONDS = 180
-const PREP_SECONDS = 60
+// Time to think before recording starts by itself. A real viva doesn't leave room to look an answer up, and
+// follow-ups (where bluffing falls apart) get only a moment.
+const PREP_SECONDS = { main: 20, followup: 5 }
+const AWAY_MIN_MS = 1500 // ignore blips such as a permission prompt taking focus
 
 const state = ref(null)
 const error = ref('')
@@ -21,6 +24,39 @@ const preview = ref(null) // <video> element for the live camera preview
 let rec = null
 let tick = null
 let prepTimer = null
+const prepTotal = ref(PREP_SECONDS.main)
+
+// Integrity signals for the open question: leaving the page and pasting. Sent with the answer and shown to the
+// instructor as context only; they never change a score.
+let away = { count: 0, ms: 0, since: null }
+let pasted = 0
+function resetSignals() {
+  away = { count: 0, ms: 0, since: isAway() ? Date.now() : null }
+  pasted = 0
+}
+function isAway() {
+  return document.hidden || !document.hasFocus()
+}
+function onFocusChange() {
+  if (!questionKey.value) return
+  if (isAway() && away.since == null) away.since = Date.now()
+  else if (!isAway() && away.since != null) closeAway()
+}
+function closeAway() {
+  const ms = Date.now() - away.since
+  away.since = null
+  if (ms >= AWAY_MIN_MS) {
+    away.count++
+    away.ms += ms
+  }
+}
+function signals() {
+  if (away.since != null) closeAway()
+  return { left_page_count: away.count, left_page_seconds: Math.round(away.ms / 1000), pasted_chars: pasted }
+}
+function onPaste(e) {
+  pasted += (e.clipboardData?.getData('text') || '').length
+}
 
 const current = computed(() => state.value?.current)
 const done = computed(() => state.value && !current.value && ['scoring', 'completed', 'scoring_failed'].includes(state.value.status))
@@ -159,7 +195,8 @@ function stopPrep() {
 function startPrep() {
   stopPrep()
   if (!micSupported || typing.value || canType.value) return
-  prepLeft.value = PREP_SECONDS
+  prepTotal.value = PREP_SECONDS[current.value?.kind] ?? PREP_SECONDS.main
+  prepLeft.value = prepTotal.value
   prepTimer = setInterval(() => {
     prepLeft.value--
     if (prepLeft.value <= 0) {
@@ -174,6 +211,7 @@ const questionKey = computed(() =>
 )
 watch(questionKey, (key) => {
   stopSpeaking()
+  resetSignals()
   key ? startPrep() : stopPrep()
 })
 watch(typing, (t) => t && stopPrep())
@@ -240,6 +278,7 @@ async function send({ audio, text }) {
   form.append('kind', current.value.kind)
   if (audio) form.append('audio', audio, 'answer.wav')
   if (text) form.append('text', text)
+  for (const [k, v] of Object.entries(signals())) form.append(k, v)
   try {
     const res = await api(`/api/submissions/${props.id}/viva/answer`, { method: 'POST', form })
     lastTranscript.value = res.last_transcript
@@ -254,8 +293,16 @@ async function send({ audio, text }) {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  document.addEventListener('visibilitychange', onFocusChange)
+  window.addEventListener('blur', onFocusChange)
+  window.addEventListener('focus', onFocusChange)
+})
 onUnmounted(() => {
+  document.removeEventListener('visibilitychange', onFocusChange)
+  window.removeEventListener('blur', onFocusChange)
+  window.removeEventListener('focus', onFocusChange)
   clearInterval(pollTimer)
   cancelRec()
   stopSpeaking()
@@ -300,8 +347,8 @@ onUnmounted(() => {
           <p class="mt-1 text-slate-500">{{ state.total_questions }} questions about the methods and decisions in your own submission. Some may have one follow-up.</p>
         </div>
         <ul class="space-y-3 text-sm text-slate-700">
-          <li v-if="canType" class="flex gap-3"><Icon name="keyboard" class="mt-0.5 text-indigo-500" /><span><b>Typed answers:</b> your accommodation is approved, so you'll type your answers. They're assessed by an AI service (Google Gemini) and stored so your instructor can read them. You can still record an answer if you prefer.</span></li>
-          <li v-else class="flex gap-3"><Icon name="mic" class="mt-0.5 text-indigo-500" /><span><b>Recording notice:</b> you get 1 minute to prepare for each question, then recording starts automatically (you can start sooner). Your camera is on while you answer; the video stays on your device and is not uploaded. Your spoken answers are recorded, transcribed by an AI service (Google Gemini), and stored so your instructor can listen and read the transcript.</span></li>
+          <li v-if="canType" class="flex gap-3"><Icon name="keyboard" class="mt-0.5 text-indigo-500" /><span><b>Typed answers:</b> your accommodation is approved, so you'll type your answers. They're assessed by an AI service (Google Gemini) and stored so your instructor can read them. You can still record an answer if you prefer. Stay on this page while a question is open: your instructor sees if you leave it or paste text in. This alone doesn't affect your score.</span></li>
+          <li v-else class="flex gap-3"><Icon name="mic" class="mt-0.5 text-indigo-500" /><span><b>Recording notice:</b> you get 20 seconds to think about each question and a few seconds for follow-ups, then recording starts automatically (you can start sooner). Stay on this page while a question is open: your instructor sees if you leave it or paste text in. This alone doesn't affect your score. Your camera is on while you answer; the video stays on your device and is not uploaded. Your spoken answers are recorded, transcribed by an AI service (Google Gemini), and stored so your instructor can listen and read the transcript.</span></li>
           <li class="flex gap-3"><Icon name="chart" class="mt-0.5 text-indigo-500" /><span>The AI produces an <b>understanding score</b> your instructor reviews and can change. It's one part of your grade, next to a human grader's mark for your written solution. It doesn't judge accent, pauses, or phrasing — only content.</span></li>
         </ul>
 
@@ -418,7 +465,7 @@ onUnmounted(() => {
                     Recording starts in <span class="font-mono font-semibold text-indigo-600">{{ prepClock }}</span>
                   </span>
                   <div class="h-1 w-48 overflow-hidden rounded-full bg-slate-200">
-                    <div class="h-full bg-indigo-500 transition-[width] duration-1000 ease-linear" :style="{ width: `${(prepLeft / PREP_SECONDS) * 100}%` }"></div>
+                    <div class="h-full bg-indigo-500 transition-[width] duration-1000 ease-linear" :style="{ width: `${(prepLeft / prepTotal) * 100}%` }"></div>
                   </div>
                   <button class="btn-secondary btn-sm" @click="startRec">I'm ready — start now</button>
                 </template>
@@ -454,7 +501,7 @@ onUnmounted(() => {
           </template>
 
           <div v-else class="space-y-3">
-            <textarea v-model="typed" class="input text-base" rows="6" placeholder="Type your answer…"></textarea>
+            <textarea v-model="typed" class="input text-base" rows="6" placeholder="Type your answer…" @paste="onPaste"></textarea>
             <div class="flex items-center justify-between gap-3">
               <button v-if="micSupported" class="btn-ghost btn-sm" @click="typing = false"><Icon name="mic" :size="14" />Record instead</button>
               <button class="btn-primary ml-auto" :disabled="!typed.trim()" @click="sendTyped"><Icon name="send" />Submit answer</button>

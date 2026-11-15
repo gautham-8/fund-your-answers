@@ -17,6 +17,16 @@ router = APIRouter(prefix="/api", tags=["viva"])
 AUDIO_EXT = {"audio/wav": "wav", "audio/x-wav": "wav", "audio/webm": "webm", "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a"}
 
 
+def _integrity(left_count: int, left_seconds: int, pasted: int) -> dict | None:
+    """Clamp what the browser reported; None when nothing happened."""
+    sig = {
+        "left_page_count": max(0, min(left_count, 1000)),
+        "left_page_seconds": max(0, min(left_seconds, 24 * 3600)),
+        "pasted_chars": max(0, min(pasted, 1_000_000)),
+    }
+    return sig if any(sig.values()) else None
+
+
 async def _state(sub: dict) -> dict:
     turns = await db.viva_turns.find({"submission_id": sub["_id"]}).to_list(None)
     step = pipeline.current_step(sub, turns) if sub["status"] in (pipeline.READY, pipeline.IN_PROGRESS) else None
@@ -108,6 +118,11 @@ async def answer(
     kind: Literal["main", "followup"] = Form(...),
     text: str | None = Form(None),
     audio: UploadFile | None = File(None),
+    # Integrity signals measured by the browser while this question was open. They are shown to the
+    # instructor as context and never change a score on their own.
+    left_page_count: int = Form(0),
+    left_page_seconds: int = Form(0),
+    pasted_chars: int = Form(0),
     user: dict = Depends(student),
 ):
     sub, assignment, _ = await load_submission(user, submission_id)
@@ -175,6 +190,7 @@ async def answer(
         "quality": ev.quality,
         "notes": ev.notes,
         "followup_question": ev.followup_question.strip() if kind == "main" else "",
+        "integrity": _integrity(left_page_count, left_page_seconds, pasted_chars),
         "created_at": db.now(),
     }
     try:

@@ -109,6 +109,16 @@ const QUALITY = {
   no_answer: ['No answer', 'bg-slate-100 text-slate-500 ring-slate-200'],
 }
 const finalOf = (d) => d.override_score ?? d.score
+/** Plain-language integrity signals for one answer, e.g. ["Left the viva page 2× (35 s)", "Pasted 340 characters"]. */
+function signalsOf(t) {
+  const g = t.integrity
+  if (!g) return []
+  const out = []
+  if (g.left_page_count) out.push(`Left the viva page ${g.left_page_count}× (${g.left_page_seconds} s)`)
+  if (g.pasted_chars) out.push(`Pasted ${g.pasted_chars} characters`)
+  return out
+}
+const flaggedTurns = computed(() => (sub.value?.turns || []).filter((t) => signalsOf(t).length).length)
 const reviewCount = computed(() => (sub.value?.score?.dimensions || []).filter((d) => d.needs_review && d.override_score == null).length)
 /** Short list of things the instructor has to act on; empty means nothing needs attention. */
 const todo = computed(() => {
@@ -117,6 +127,7 @@ const todo = computed(() => {
   const out = []
   if (s.status === 'completed' && s.grader_points == null) out.push(s.questions_graded ? `Finish grading the written solution (${s.questions_graded}/${s.parts.length} questions done)` : 'Grade the written solution')
   if (reviewCount.value) out.push(`Check ${reviewCount.value} viva score${reviewCount.value === 1 ? '' : 's'} the AI wasn't sure about`)
+  if (flaggedTurns.value) out.push(`Look at ${flaggedTurns.value} answer${flaggedTurns.value === 1 ? '' : 's'} given while the student left the page or pasted text`)
   if (openRegrades.value.length) out.push(`Answer ${openRegrades.value.length} regrade request${openRegrades.value.length === 1 ? '' : 's'}`)
   return out
 })
@@ -299,6 +310,7 @@ onUnmounted(() => {
                 <Icon v-if="k > 0" name="arrow-right" :size="11" class="text-slate-300" />
                 <span v-if="t.quality" class="rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset" :class="QUALITY[t.quality]?.[1]">{{ QUALITY[t.quality]?.[0] || t.quality }}</span>
               </template>
+              <Icon v-if="turnsFor(i).some((t) => signalsOf(t).length)" name="eye" :size="13" class="ml-1 text-orange-600" title="Left the page or pasted text during this question" />
             </span>
           </button>
 
@@ -310,6 +322,9 @@ onUnmounted(() => {
                 <span class="inline-flex items-center gap-1"><Icon :name="t.answer_mode === 'typed' ? 'keyboard' : 'mic'" :size="12" />{{ t.answer_mode === 'typed' ? 'Typed' : 'Spoken' }}</span>
                 <span v-if="t.notes">· {{ t.notes }}</span>
               </div>
+              <p v-if="signalsOf(t).length" class="inline-flex items-center gap-1.5 rounded-lg bg-orange-50 px-2 py-1 text-xs text-orange-800 ring-1 ring-orange-200 ring-inset" title="Measured by the browser while this question was open. Context for you to judge; it doesn't change the score.">
+                <Icon name="eye" :size="12" />{{ signalsOf(t).join(' · ') }}
+              </p>
               <audio v-if="audio[t.id]" :src="audio[t.id]" controls class="h-8 w-full max-w-xs"></audio>
             </div>
             <p v-if="!turnsFor(i).length" class="text-sm text-slate-600">{{ q.question }}</p>

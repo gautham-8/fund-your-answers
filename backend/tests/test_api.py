@@ -106,7 +106,8 @@ def test_full_viva_flow(client, fake_gemini, files_coll):
     assert st["current"] == {"question_index": 0, "kind": "followup", "question": "Why that pivot?"}
     wrong = client.post(f"/api/submissions/{sid}/viva/answer", data={"question_index": 1, "kind": "main", "text": "x"}, headers=S)
     assert wrong.status_code == 409
-    st = ok(client.post(f"/api/submissions/{sid}/viva/answer", data={"question_index": 0, "kind": "followup", "text": "median of three, answer about pivots"}, headers=S))
+    st = ok(client.post(f"/api/submissions/{sid}/viva/answer", data={"question_index": 0, "kind": "followup", "text": "median of three, answer about pivots",
+                                                                       "left_page_count": 2, "left_page_seconds": 35, "pasted_chars": -5}, headers=S))
     assert "Original question" in fake_gemini.eval_calls[-1]["context"]
     for i in (1, 2, 3):
         assert st["current"]["question_index"] == i and st["current"]["kind"] == "main"
@@ -125,6 +126,10 @@ def test_full_viva_flow(client, fake_gemini, files_coll):
     assert dims[2]["quote_verified"] and not dims[2]["needs_review"]
     assert rep["needs_review"] and rep["score"]["overall"] == 80.0
     assert len(rep["turns"]) == 5 and rep["turns"][0]["has_audio"] and rep["turns"][1]["kind"] == "followup"
+    # Integrity signals are stored per answer (clamped) and shown to the instructor; quiet answers carry none
+    assert rep["turns"][0]["integrity"] is None
+    assert rep["turns"][1]["integrity"] == {"left_page_count": 2, "left_page_seconds": 35, "pasted_chars": 0}
+    assert rep["score"]["overall"] == 80.0  # signals never change the score
 
     # Files come back from GridFS; audio is compressed to MP3 when ffmpeg is present
     a = client.get(f"/api/turns/{rep['turns'][0]['id']}/audio", headers=I)

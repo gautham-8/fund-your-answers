@@ -277,6 +277,7 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
                 "has_audio": bool(t.get("audio_file_id")),
                 "quality": t.get("quality"),
                 "notes": t.get("notes"),
+                "integrity": t.get("integrity"),
             }
             for t in turns
         ],
