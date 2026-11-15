@@ -17,6 +17,7 @@ const routes = [
     ],
   },
   { path: '/assignments/:id', component: () => import('./views/AssignmentView.vue'), props: true },
+  { path: '/submissions/:id/pages', component: () => import('./views/PagesView.vue'), props: true, meta: { role: 'student' } },
   { path: '/submissions/:id/viva', component: () => import('./views/VivaView.vue'), props: true, meta: { role: 'student' } },
   { path: '/submissions/:id/report', component: () => import('./views/ReportView.vue'), props: true, meta: { role: 'instructor' } },
   { path: '/:pathMatch(.*)*', redirect: '/' },

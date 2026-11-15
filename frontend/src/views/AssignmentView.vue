@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, blobUrl } from '../lib/api'
+import { api } from '../lib/api'
 import { auth } from '../lib/auth'
 import { dueState, fmtDate, humanize, initials, now, relative, scoreTone, tzAbbr } from '../lib/format'
 import { loadCourses, setCourse } from '../lib/store'
@@ -27,8 +27,6 @@ const publishing = ref(false)
 const q = ref('')
 const filter = ref('all')
 const regrade = reactive({ open: false, index: null, message: '', busy: false })
-const pages = ref([]) // student's edited copy of my_submission.page_map
-const savingPages = ref(false)
 let timer = null
 
 const mySub = computed(() => a.value?.my_submission)
@@ -40,7 +38,6 @@ async function load() {
   try {
     a.value = await api(`/api/assignments/${props.id}`)
     setCourse(a.value.course)
-    pages.value = (a.value.my_submission?.page_map || []).map((p) => [...p])
   } catch (e) {
     error.value = e.message
   }
@@ -95,30 +92,6 @@ async function upload() {
   } finally {
     uploading.value = false
   }
-}
-
-function togglePage(i, page) {
-  const list = pages.value[i]
-  const at = list.indexOf(page)
-  if (at >= 0) list.splice(at, 1)
-  else list.push(page)
-}
-
-async function confirmPages() {
-  savingPages.value = true
-  try {
-    await api(`/api/submissions/${mySub.value.id}/pages`, { method: 'PUT', body: { pages: pages.value } })
-    toast('Pages confirmed. Your viva is ready')
-    await load()
-  } catch (e) {
-    toast(e.message, { type: 'error' })
-  } finally {
-    savingPages.value = false
-  }
-}
-
-async function openPdf() {
-  window.open(await blobUrl(`/api/submissions/${mySub.value.id}/pdf`), '_blank')
 }
 
 async function retry(subId) {
@@ -351,33 +324,12 @@ onUnmounted(() => {
               We couldn't analyze your PDF. <button class="font-medium underline" @click="retry(mySub.id)">Try again</button> or upload a different file.
               <div v-if="mySub.error" class="mt-1 text-xs opacity-80">{{ mySub.error }}</div>
             </div>
-            <div v-if="mySub?.status === 'ready' && mySub.pages_pending" class="space-y-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
-              <div class="flex flex-wrap items-start justify-between gap-3">
-                <div class="max-w-md">
-                  <div class="font-semibold text-slate-900">Check your answer pages</div>
-                  <p class="mt-1 text-sm text-slate-600">We matched your PDF pages to each question. Click a page to add or remove it, then confirm.</p>
-                </div>
-                <button class="btn-secondary btn-sm" @click="openPdf"><Icon name="file" :size="14" />View my PDF<Icon name="external" :size="12" class="text-slate-400" /></button>
+            <div v-if="mySub?.status === 'ready' && mySub.pages_pending" class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
+              <div class="max-w-md">
+                <div class="font-semibold text-slate-900">Check your answer pages</div>
+                <p class="mt-1 text-sm text-slate-600">We matched your PDF pages to each question. Look them over, fix anything wrong, then confirm.</p>
               </div>
-              <div v-for="(q, i) in a.parts" :key="i">
-                <p class="mb-1.5 text-sm font-medium text-slate-800">Q{{ i + 1 }}. {{ q }}</p>
-                <div class="flex flex-wrap gap-1">
-                  <button
-                    v-for="p in mySub.page_count"
-                    :key="p"
-                    type="button"
-                    class="h-8 min-w-8 rounded-md border px-2 text-sm font-medium transition"
-                    :class="pages[i].includes(p) ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-indigo-300'"
-                    :aria-pressed="pages[i].includes(p)"
-                    :title="`Page ${p}`"
-                    @click="togglePage(i, p)"
-                  >
-                    {{ p }}
-                  </button>
-                </div>
-                <p v-if="!pages[i].length" class="mt-1 text-xs text-orange-600">No pages selected. Leave it empty only if you didn't answer this question.</p>
-              </div>
-              <button class="btn-primary" :disabled="savingPages" @click="confirmPages"><Icon name="check" />{{ savingPages ? 'Confirming…' : 'Confirm pages' }}</button>
+              <RouterLink :to="`/submissions/${mySub.id}/pages`" class="btn-primary"><Icon name="file" />Select pages</RouterLink>
             </div>
             <div v-if="(mySub?.status === 'ready' && !mySub.pages_pending) || mySub?.status === 'viva_in_progress'" class="flex flex-wrap items-center justify-between gap-4 rounded-xl bg-linear-to-br from-indigo-600 to-violet-600 p-5 text-white">
               <div class="max-w-md">
@@ -388,6 +340,7 @@ onUnmounted(() => {
                 <Icon name="mic" />{{ mySub.status === 'ready' ? 'Start viva' : 'Continue viva' }}
               </RouterLink>
             </div>
+            <RouterLink v-if="mySub?.status === 'ready' && mySub.page_map && !mySub.pages_pending" :to="`/submissions/${mySub.id}/pages`" class="btn-ghost btn-sm"><Icon name="file" :size="14" />Reselect answer pages</RouterLink>
             <div v-if="(mySub?.status === 'scoring' || mySub?.status === 'completed') && !results" class="flex items-center gap-3 rounded-xl bg-emerald-50 p-4 text-sm text-emerald-900">
               <Icon name="check-circle" :size="18" class="text-emerald-600" />
               Viva complete — thanks! You’ll see your grade here once your instructor publishes it.

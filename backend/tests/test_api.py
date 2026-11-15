@@ -155,7 +155,13 @@ def test_page_matching_must_be_confirmed_before_viva(client):
     assert client.put(url, json={"pages": [[1]]}, headers=S).status_code == 400          # one list per question
     assert client.put(url, json={"pages": [[1], [4]]}, headers=S).status_code == 400     # past the last page
     assert client.put(url, json={"pages": [[1], [3]]}, headers=I).status_code == 403
-    assert ok(client.put(url, json={"pages": [[2, 1, 2], [3]]}, headers=S))["page_map"] == [[1, 2], [3]]
+    assert client.put(url, json={"pages": [[1], [3]], "order": [3, 1, 1]}, headers=S).status_code == 400  # not a permutation
+    assert client.put(url, json={"pages": [[1], [3]], "rotation": [0, 90]}, headers=S).status_code == 400  # one per page
+    assert client.put(url, json={"pages": [[1], [3]], "rotation": [0, 45, 0]}, headers=S).status_code == 422
+    body = {"pages": [[2, 1, 2], [3]], "order": [3, 1, 2], "rotation": [0, 90, 0]}
+    assert ok(client.put(url, json=body, headers=S))["page_map"] == [[1, 2], [3]]
+    mine = ok(client.get(f"/api/submissions/{sid}", headers=S))
+    assert mine["page_order"] == [3, 1, 2] and mine["page_rotation"] == [0, 90, 0]
 
     assert not ok(client.get(f"/api/submissions/{sid}/viva", headers=S))["pages_pending"]
     ok(client.post(f"/api/submissions/{sid}/viva/consent", headers=S))

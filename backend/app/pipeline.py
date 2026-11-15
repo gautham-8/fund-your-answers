@@ -1,9 +1,11 @@
 """Background work: PDF analysis -> questions, and final scoring. Plus viva progress logic."""
 
+import io
 import logging
 import re
 
 from bson import ObjectId
+from pypdf import PdfReader
 
 from . import db, gemini, storage
 from .config import settings
@@ -31,13 +33,14 @@ async def run_analysis(submission_id: ObjectId) -> None:
         questions = [q.model_dump() for q in qs.questions[: settings.num_questions]]
         if not questions:
             raise RuntimeError("No questions generated")
+        page_count = count_pages(pdf_bytes) or analysis.page_count
         parts = assignment.get("parts") or []
-        page_map = match_pages(analysis, len(parts)) if parts else None
+        page_map = match_pages(analysis, len(parts), page_count) if parts else None
         await db.submissions.update_one(
             {"_id": submission_id},
             {"$set": {
                 "analysis": analysis_dict, "questions": questions, "page_map": page_map,
-                "page_count": analysis.page_count, "pages_confirmed_at": None, "status": READY, "error": None,
+                "page_count": page_count, "page_order": None, "page_rotation": None, "pages_confirmed_at": None, "status": READY, "error": None,
             }},
         )
     except Exception as e:  # noqa: BLE001 - surface any failure to the UI
@@ -47,16 +50,24 @@ async def run_analysis(submission_id: ObjectId) -> None:
         )
 
 
+def count_pages(pdf_bytes: bytes) -> int | None:
+    """Real page count, or None when pypdf can't parse the file (Gemini's count is the fallback)."""
+    try:
+        return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+    except Exception:  # noqa: BLE001 - any parse failure means "unknown"
+        return None
+
+
 def clean_pages(pages: list[int], page_count: int) -> list[int]:
     return sorted({p for p in pages if 1 <= p <= page_count})
 
 
-def match_pages(analysis: gemini.PdfAnalysis, n_parts: int) -> list[list[int]]:
+def match_pages(analysis: gemini.PdfAnalysis, n_parts: int, page_count: int) -> list[list[int]]:
     """AI page guesses as one sorted page list per assignment question, dropping pages outside the PDF."""
     out: list[list[int]] = [[] for _ in range(n_parts)]
     for m in analysis.page_map:
         if 1 <= m.part <= n_parts:
-            out[m.part - 1] = clean_pages(out[m.part - 1] + m.pages, analysis.page_count)
+            out[m.part - 1] = clean_pages(out[m.part - 1] + m.pages, page_count)
     return out
 
 
