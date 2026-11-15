@@ -16,17 +16,26 @@ def make_class(client, n_students=1):
     return I, students, course, asg
 
 
-def run_viva(client, asg, S, voice_first=True):
+def allow_typing(client, sid, S, I):
+    """Student asks for the typed-answer accommodation and the instructor approves it."""
+    req = ok(client.post(f"/api/submissions/{sid}/accommodation", json={"reason": "Speech impairment"}, headers=S))
+    ok(client.patch(f"/api/accommodations/{req['id']}", json={"status": "approved"}, headers=I))
+
+
+def run_viva(client, asg, S, typed_by=None):
+    """Answer every question by voice, or (with `typed_by` = the approving instructor) by typing after the first."""
     sid = ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4 fake")}, headers=S))["id"]
     mine = ok(client.get(f"/api/submissions/{sid}", headers=S))
     if mine["pages_pending"]:  # accept the AI's page matches as they are
         ok(client.put(f"/api/submissions/{sid}/pages", json={"pages": mine["page_map"]}, headers=S))
+    if typed_by:
+        allow_typing(client, sid, S, typed_by)
     ok(client.post(f"/api/submissions/{sid}/viva/consent", headers=S))
     st = ok(client.get(f"/api/submissions/{sid}/viva", headers=S))
     while st["current"]:
         cur = st["current"]
         data = {"question_index": cur["question_index"], "kind": cur["kind"]}
-        if voice_first and cur["question_index"] == 0 and cur["kind"] == "main":
+        if not typed_by or (cur["question_index"] == 0 and cur["kind"] == "main"):
             st = ok(client.post(f"/api/submissions/{sid}/viva/answer", data=data, files={"audio": ("a.wav", wav(), "audio/wav")}, headers=S))
         else:
             st = ok(client.post(f"/api/submissions/{sid}/viva/answer", data={**data, "text": f"answer about pivots {cur['question_index']}"}, headers=S))
@@ -89,6 +98,7 @@ def test_full_viva_flow(client, fake_gemini, files_coll):
     assert st["status"] == "ready" and st["total_questions"] == 4
     no_consent = client.post(f"/api/submissions/{sid}/viva/answer", data={"question_index": 0, "kind": "main", "text": "x"}, headers=S)
     assert no_consent.status_code == 400
+    allow_typing(client, sid, S, I)
     ok(client.post(f"/api/submissions/{sid}/viva/consent", headers=S))
 
     st = ok(client.post(f"/api/submissions/{sid}/viva/answer", data={"question_index": 0, "kind": "main"},
@@ -181,7 +191,7 @@ def test_class_insights(client):
     assert ok(client.get(url, headers=I))["completed"] == 0
     s0 = run_viva(client, asg, students[0])
     assert client.post(url + "/concept-gaps", headers=I).status_code == 400  # needs >= 2
-    run_viva(client, asg, students[1], voice_first=False)
+    run_viva(client, asg, students[1], typed_by=I)
 
     ok(client.patch(f"/api/submissions/{s0}/scores/0", json={"override_score": 5}, headers=I))  # AI 4 -> 5
     ok(client.patch(f"/api/submissions/{s0}/scores/3", json={"override_score": 1}, headers=I))  # AI 4 -> 1
@@ -308,6 +318,79 @@ def test_publish_grades_and_regrade_requests(client):
 
     rr2 = ok(client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 1, "message": "hm"}, headers=S))
     assert client.delete(f"/api/regrade-requests/{rr2['id']}", headers=S).status_code == 204
+
+
+def test_course_concept_gaps_rank_what_to_revisit(client):
+    I, students, course, a1 = make_class(client, n_students=3)
+    a2 = ok(client.post(f"/api/courses/{course['id']}/assignments", json={"title": "Graphs"}, headers=I))
+    url = f"/api/courses/{course['id']}/concept-gaps"
+    assert client.get(url, headers=students[0]).status_code == 403
+
+    for S in students:
+        run_viva(client, a1, S)
+    run_viva(client, a2, students[0])  # only 1 viva: too few to analyse
+
+    rep = ok(client.get(url, headers=I))
+    assert rep["gaps"] == []
+    by_title = {a["title"]: a for a in rep["assignments"]}
+    assert by_title["Sorting"]["stale"] and by_title["Sorting"]["completed"] == 3
+    assert not by_title["Graphs"]["stale"]
+
+    rep = ok(client.post(url, headers=I))
+    assert rep["failed"] == []
+    assert [(g["concept"], g["share"], g["assignment"]["title"]) for g in rep["gaps"]] == [
+        ("Pivot choice", 1.0, "Sorting"), ("Stability", 0.33, "Sorting")]
+    assert not {a["title"]: a for a in rep["assignments"]}["Sorting"]["stale"]
+    assert "students" not in rep["gaps"][0]  # no per-student labels in the course view
+
+
+def test_typed_answers_need_an_approved_accommodation(client):
+    I, (S,), course, asg = make_class(client)
+    sid = ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4 fake")}, headers=S))["id"]
+    url = f"/api/submissions/{sid}/accommodation"
+    typed = {"question_index": 0, "kind": "main", "text": "typed answer"}
+
+    # Voice by default: typing is refused without a request
+    ok(client.post(f"/api/submissions/{sid}/viva/consent", headers=S))
+    assert client.post(f"/api/submissions/{sid}/viva/answer", data=typed, headers=S).status_code == 403
+
+    # A pending request blocks starting the viva until it's decided or withdrawn
+    req = ok(client.post(url, json={"reason": "Stammer; on file with disability services"}, headers=S))
+    assert req["status"] == "pending"
+    assert client.post(f"/api/submissions/{sid}/viva/consent", headers=S).status_code == 400
+    assert ok(client.get(f"/api/courses/{course['id']}", headers=I))["pending_accommodations"] == 1
+    listed = ok(client.get(f"/api/courses/{course['id']}/accommodations", headers=I))
+    assert listed[0]["student"]["name"] == "Stu0" and listed[0]["assignment"]["title"] == "Sorting"
+    assert client.get(f"/api/courses/{course['id']}/accommodations", headers=S).status_code == 403
+    assert client.patch(f"/api/accommodations/{req['id']}", json={"status": "approved"}, headers=S).status_code == 403
+
+    # Denied: still voice only; the student may ask again before starting
+    ok(client.patch(f"/api/accommodations/{req['id']}", json={"status": "denied", "response": "Please bring the DSS letter"}, headers=I))
+    st = ok(client.get(f"/api/submissions/{sid}/viva", headers=S))
+    assert st["accommodation"]["status"] == "denied" and st["accommodation"]["response"] == "Please bring the DSS letter"
+    assert client.post(f"/api/submissions/{sid}/viva/answer", data=typed, headers=S).status_code == 403
+    assert client.delete(url, headers=S).status_code == 400  # only pending can be withdrawn
+    req = ok(client.post(url, json={"reason": "Letter attached via email"}, headers=S))
+    assert req["status"] == "pending"
+    ok(client.patch(f"/api/accommodations/{req['id']}", json={"status": "approved"}, headers=I))
+
+    # Approved: typed answers accepted
+    st = ok(client.post(f"/api/submissions/{sid}/viva/answer", data=typed, headers=S))
+    assert st["answered_questions"] == 1 and st["accommodation"]["status"] == "approved"
+
+    # Too late to ask once the viva has started
+    _, (S2,), _, asg2 = make_class(client)
+    sid2 = run_viva(client, asg2, S2)
+    assert client.post(f"/api/submissions/{sid2}/accommodation", json={"reason": "x"}, headers=S2).status_code == 400
+
+
+def test_withdrawing_a_pending_accommodation_unblocks_voice(client):
+    I, (S,), _, asg = make_class(client)
+    sid = ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4 fake")}, headers=S))["id"]
+    ok(client.post(f"/api/submissions/{sid}/accommodation", json={"reason": "RSI"}, headers=S))
+    assert client.delete(f"/api/submissions/{sid}/accommodation", headers=S).status_code == 204
+    ok(client.post(f"/api/submissions/{sid}/viva/consent", headers=S))
+    assert ok(client.get(f"/api/submissions/{sid}/viva", headers=S))["accommodation"] is None
 
 
 # ---------- relevance check, handouts, 0-5 scale ----------

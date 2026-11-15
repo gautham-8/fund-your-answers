@@ -17,6 +17,7 @@ submissions = db["submissions"]
 viva_turns = db["viva_turns"]
 scores = db["scores"]
 regrade_requests = db["regrade_requests"]
+accommodation_requests = db["accommodation_requests"]
 
 
 async def ensure_indexes() -> None:
@@ -30,6 +31,8 @@ async def ensure_indexes() -> None:
     await scores.create_index("submission_id", unique=True)
     await regrade_requests.create_index([("course_id", ASCENDING), ("created_at", ASCENDING)])
     await regrade_requests.create_index("submission_id")
+    await accommodation_requests.create_index("submission_id", unique=True)
+    await accommodation_requests.create_index([("course_id", ASCENDING), ("created_at", ASCENDING)])
 
 
 def oid(value: str) -> ObjectId:

@@ -13,7 +13,10 @@ const routes = [
     children: [
       { path: '', component: () => import('./views/CourseAssignments.vue') },
       { path: 'regrades', component: () => import('./views/CourseRegrades.vue') },
-      { path: 'roster', component: () => import('./views/CourseRoster.vue'), meta: { role: 'instructor' } },
+      { path: 'students', component: () => import('./views/CourseRoster.vue'), meta: { role: 'instructor' } },
+      { path: 'roster', redirect: (to) => `/courses/${to.params.id}/students` }, // old link
+      { path: 'insights', component: () => import('./views/CourseInsights.vue'), meta: { role: 'instructor' } },
+      { path: 'accommodations', component: () => import('./views/CourseAccommodations.vue'), meta: { role: 'instructor' } },
     ],
   },
   { path: '/assignments/:id', component: () => import('./views/AssignmentView.vue'), props: true },
@@ -37,5 +40,20 @@ router.beforeEach((to) => {
   if (to.meta.role && auth.user?.role !== to.meta.role) return '/'
   return true
 })
+
+// After a deploy, lazily loaded pages from the old build no longer exist, so clicking a link would do nothing.
+// Load the new build by doing a full page load of where the user was going (once, so it can't loop).
+const reloaded = {
+  get: () => { try { return sessionStorage.getItem('viva_reloaded') } catch { return null } },
+  set: (v) => { try { v ? sessionStorage.setItem('viva_reloaded', v) : sessionStorage.removeItem('viva_reloaded') } catch {} },
+}
+router.onError((err, to) => {
+  const stale = /dynamically imported module|Importing a module script failed|error loading dynamically/i.test(err?.message || '')
+  if (stale && reloaded.get() !== to.fullPath) {
+    reloaded.set(to.fullPath)
+    location.assign(to.fullPath)
+  }
+})
+router.afterEach(() => reloaded.set(null))
 
 export default router

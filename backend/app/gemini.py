@@ -1,8 +1,11 @@
 """All Gemini calls live here. Every call returns validated structured JSON."""
 
+import io
 import json
 import logging
+import re
 import time
+import wave
 
 from google import genai
 from google.genai import types
@@ -386,3 +389,61 @@ Only include a gap if at least two students show it, unless the class is very sm
 are affected. List at most 6 gaps. Refer to students only by their labels. This is about what to reteach,
 not about individual students."""
     return await _generate(settings.gemini_scoring_model, [_text(prompt)], ClassInsights)
+
+
+# ---------- Text-to-speech ----------
+
+_tts_client: genai.Client | None = None
+
+
+def tts_client() -> genai.Client:
+    """Speech models (and speech_config) are only served on the v1beta API."""
+    global _tts_client
+    if _tts_client is None:
+        client()  # same key check
+        _tts_client = genai.Client(
+            api_key=settings.gemini_api_key,
+            http_options=types.HttpOptions(api_version="v1beta", timeout=30_000, retry_options=types.HttpRetryOptions(attempts=1)),
+        )
+    return _tts_client
+
+
+async def speak(text: str) -> bytes:
+    """Read a viva question aloud in a natural voice. Returns a WAV file."""
+    config = types.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=settings.gemini_tts_voice)
+            )
+        ),
+    )
+    # Plain text on purpose: style instructions ("warm, calm tone...") make the model speak about 2.5x slower.
+    prompt = text
+    chain = [settings.gemini_tts_model, *(m.strip() for m in settings.gemini_tts_fallback_models.split(",") if m.strip())]
+    now = time.monotonic()
+    chain = [m for m in dict.fromkeys(chain) if _cooldown.get(m, 0) <= now]
+    resp = None
+    for m in chain:
+        t0 = time.monotonic()
+        try:
+            resp = await tts_client().aio.models.generate_content(model=m, contents=prompt, config=config)
+            log.info("Gemini TTS OK: model=%s in %.1fs", m, time.monotonic() - t0)
+            break
+        except Exception as e:  # noqa: BLE001
+            if not _is_overloaded(e):
+                raise
+            _cooldown[m] = time.monotonic() + 60  # TTS quotas are per minute
+            log.warning("Gemini TTS busy: model=%s (%s); trying next model", m, str(e)[:80])
+    if resp is None:
+        raise GeminiBusyError("All speech models are busy")
+    blob = resp.candidates[0].content.parts[0].inline_data
+    # Gemini returns raw 16-bit mono PCM, e.g. "audio/L16;codec=pcm;rate=24000".
+    rate = int(m.group(1)) if (m := re.search(r"rate=(\d+)", blob.mime_type or "")) else 24000
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(blob.data)
+    return out.getvalue()

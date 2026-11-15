@@ -29,7 +29,11 @@ const tabs = computed(() => {
     { to: base.value, label: 'Assignments', icon: 'file', count: c?.assignments.length, exact: true },
     { to: `${base.value}/regrades`, label: 'Regrade requests', icon: 'regrade', badge: c?.open_regrades },
   ]
-  if (isInstructor) t.push({ to: `${base.value}/roster`, label: 'Roster', icon: 'users', count: c?.students.length })
+  if (isInstructor) {
+    t.push({ to: `${base.value}/insights`, label: 'Insights', icon: 'chart' })
+    t.push({ to: `${base.value}/accommodations`, label: 'Accommodations', icon: 'keyboard', badge: c?.pending_accommodations })
+    t.push({ to: `${base.value}/students`, label: 'Students', icon: 'users', count: c?.students.length })
+  }
   return t
 })
 const isActive = (t) => (t.exact ? route.path === t.to : route.path.startsWith(t.to))

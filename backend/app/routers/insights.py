@@ -5,7 +5,7 @@ import string
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import db, gemini, pipeline
-from ..access import load_assignment
+from ..access import load_assignment, load_course
 from ..auth import instructor
 
 router = APIRouter(prefix="/api", tags=["insights"])
@@ -77,12 +77,19 @@ async def insights(assignment_id: str, user: dict = Depends(instructor)):
     }
 
 
+MIN_VIVAS = 2
+
+
 @router.post("/assignments/{assignment_id}/insights/concept-gaps")
 async def generate_concept_gaps(assignment_id: str, user: dict = Depends(instructor)):
     assignment, _ = await load_assignment(user, assignment_id)
+    return await _analyse(assignment)
+
+
+async def _analyse(assignment: dict) -> dict:
     subs = await _completed(assignment["_id"])
-    if len(subs) < 2:
-        raise HTTPException(400, "Need at least 2 completed vivas to look for class-wide gaps")
+    if len(subs) < MIN_VIVAS:
+        raise HTTPException(400, f"Need at least {MIN_VIVAS} completed vivas to look for class-wide gaps")
 
     turns = await db.viva_turns.find({"submission_id": {"$in": [s["_id"] for s in subs]}}).sort(
         [("question_index", 1), ("kind", -1)]
@@ -111,9 +118,80 @@ async def generate_concept_gaps(assignment_id: str, user: dict = Depends(instruc
     gaps = []
     for g in result.gaps:
         affected = sorted({s for s in g.students if s in valid})
-        gaps.append({**g.model_dump(), "students": affected, "student_count": len(affected)})
+        if affected:
+            gaps.append({**g.model_dump(), "students": affected, "student_count": len(affected)})
     gaps.sort(key=lambda g: -g["student_count"])
 
     doc = {"overview": result.overview, "gaps": gaps, "based_on": len(subs), "generated_at": db.now()}
     await db.assignments.update_one({"_id": assignment["_id"]}, {"$set": {"concept_gaps": doc}})
     return doc
+
+
+# ---------- Course-wide: what to revisit ----------
+
+async def _course_assignments(course: dict) -> list[tuple[dict, int]]:
+    """Every assignment in the course with its number of completed vivas, oldest first."""
+    asgs = await db.assignments.find({"course_id": course["_id"]}).sort("created_at", 1).to_list(None)
+    counts: dict = {}
+    async for row in await db.submissions.aggregate([
+        {"$match": {"assignment_id": {"$in": [a["_id"] for a in asgs]}, "status": pipeline.COMPLETED}},
+        {"$group": {"_id": "$assignment_id", "n": {"$sum": 1}}},
+    ]):
+        counts[row["_id"]] = row["n"]
+    return [(a, counts.get(a["_id"], 0)) for a in asgs]
+
+
+async def _course_report(course: dict) -> dict:
+    assignments, gaps = [], []
+    for a, completed in await _course_assignments(course):
+        cg = a.get("concept_gaps")
+        assignments.append({
+            "id": str(a["_id"]),
+            "title": a["title"],
+            "completed": completed,
+            "analysed_on": cg["based_on"] if cg else None,
+            "generated_at": cg["generated_at"] if cg else None,
+            "overview": cg["overview"] if cg else None,
+            # New vivas finished since the last analysis (or never analysed but now possible)
+            "stale": completed >= MIN_VIVAS and (not cg or cg["based_on"] != completed),
+        })
+        if not cg or not cg["based_on"]:
+            continue
+        for g in cg["gaps"]:
+            gaps.append({
+                "concept": g["concept"],
+                "explanation": g["explanation"],
+                "example_quote": g.get("example_quote", ""),
+                "teaching_suggestion": g["teaching_suggestion"],
+                "student_count": g["student_count"],
+                "based_on": cg["based_on"],
+                "share": round(g["student_count"] / cg["based_on"], 2),
+                "assignment": {"id": str(a["_id"]), "title": a["title"]},
+            })
+    gaps.sort(key=lambda g: (-g["share"], -g["student_count"]))
+    return {"assignments": assignments, "gaps": gaps, "min_vivas": MIN_VIVAS}
+
+
+@router.get("/courses/{course_id}/concept-gaps")
+async def course_concept_gaps(course_id: str, user: dict = Depends(instructor)):
+    """Concept gaps from every assignment, ranked by the share of the class affected."""
+    course = await load_course(user, course_id)
+    return await _course_report(course)
+
+
+@router.post("/courses/{course_id}/concept-gaps")
+async def refresh_course_concept_gaps(course_id: str, user: dict = Depends(instructor)):
+    """Re-analyse every assignment with new completed vivas since its last analysis."""
+    course = await load_course(user, course_id)
+    failed = []
+    for a, completed in await _course_assignments(course):
+        cg = a.get("concept_gaps")
+        if completed < MIN_VIVAS or (cg and cg["based_on"] == completed):
+            continue
+        try:
+            await _analyse(a)  # one at a time: kinder to Gemini rate limits
+        except HTTPException as e:
+            failed.append({"id": str(a["_id"]), "title": a["title"], "error": e.detail})
+    report = await _course_report(course)
+    report["failed"] = failed
+    return report

@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     gemini_analysis_model: str = "gemini-3.5-flash-lite"
     gemini_viva_model: str = "gemini-3.5-flash-lite"
     gemini_scoring_model: str = "gemini-3.5-flash-lite"
+    # "Read aloud" voice for viva questions (Gemini text-to-speech). Voices: Kore, Aoede, Charon, Puck, Sulafat, ...
+    gemini_tts_model: str = "gemini-3.8-flash-tts"
+    # Tried in order when the TTS model is rate-limited (the free tier allows only a few requests per minute per model).
+    gemini_tts_fallback_models: str = "gemini-3.8-flash-lite-tts,gemini-3.1-flash-tts-preview,gemini-2.5-flash-preview-tts"
+    gemini_tts_voice: str = "Sulafat"
     # Tried in order when the main model is overloaded (503/429) or times out.
     gemini_fallback_models: str = ""
     # Per-model wait before moving to the next model.

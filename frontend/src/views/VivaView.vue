@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api } from '../lib/api'
+import { api, blobUrl } from '../lib/api'
 import { startRecording } from '../lib/recorder'
 import Icon from '../components/Icon.vue'
 
@@ -31,6 +31,9 @@ const progress = computed(() => {
 const fmt = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 const clock = computed(() => fmt(seconds.value))
 const prepClock = computed(() => fmt(prepLeft.value))
+// Typing is an accessibility accommodation: only offered once an instructor approves a request for this viva.
+const accommodation = computed(() => state.value?.accommodation)
+const canType = computed(() => accommodation.value?.status === 'approved')
 const micSupported = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined'
 
 async function load() {
@@ -42,13 +45,108 @@ async function load() {
 }
 
 async function consent() {
-  state.value = await api(`/api/submissions/${props.id}/viva/consent`, { method: 'POST' })
+  error.value = ''
+  try {
+    state.value = await api(`/api/submissions/${props.id}/viva/consent`, { method: 'POST' })
+  } catch (e) {
+    error.value = e.message
+  }
 }
 
-function speak() {
-  if (!current.value || !window.speechSynthesis) return
-  window.speechSynthesis.cancel()
-  window.speechSynthesis.speak(new SpeechSynthesisUtterance(current.value.question))
+const requestOpen = ref(false)
+const reason = ref('')
+const requesting = ref(false)
+
+async function requestTyped() {
+  requesting.value = true
+  error.value = ''
+  try {
+    state.value.accommodation = await api(`/api/submissions/${props.id}/accommodation`, { method: 'POST', body: { reason: reason.value } })
+    requestOpen.value = false
+    reason.value = ''
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    requesting.value = false
+  }
+}
+
+async function withdrawRequest() {
+  try {
+    await api(`/api/submissions/${props.id}/accommodation`, { method: 'DELETE' })
+    state.value.accommodation = null
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+// While a request waits for the instructor, check back so the page updates on its own.
+let pollTimer = null
+watch(
+  () => accommodation.value?.status === 'pending' && !state.value?.consent_given,
+  (waiting) => {
+    clearInterval(pollTimer)
+    if (waiting) pollTimer = setInterval(load, 20000)
+  },
+)
+watch(canType, (ok) => (typing.value = ok), { immediate: true })
+
+// "Read aloud": a natural Gemini voice from the backend, falling back to the best voice the browser has.
+const speaking = ref('') // '' | loading | playing
+let player = null
+let spokenKey = null
+let spokenUrl = null
+
+function stopSpeaking() {
+  player?.pause()
+  window.speechSynthesis?.cancel()
+  speaking.value = ''
+}
+
+function browserVoice() {
+  const voices = window.speechSynthesis.getVoices().filter((v) => v.lang.startsWith('en'))
+  return (
+    voices.find((v) => /natural|neural|online|premium|enhanced/i.test(v.name)) ??
+    voices.find((v) => /google/i.test(v.name)) ??
+    voices.find((v) => v.default) ??
+    voices[0]
+  )
+}
+
+function browserSpeak(text) {
+  if (!window.speechSynthesis) return (speaking.value = '')
+  const u = new SpeechSynthesisUtterance(text)
+  const voice = browserVoice()
+  if (voice) u.voice = voice
+  u.rate = 0.95
+  u.onend = u.onerror = () => (speaking.value = '')
+  speaking.value = 'playing'
+  window.speechSynthesis.speak(u)
+}
+
+async function speak() {
+  if (!current.value) return
+  if (speaking.value) return stopSpeaking()
+  const key = questionKey.value
+  const text = current.value.question
+  if (spokenKey !== key) {
+    if (spokenUrl) URL.revokeObjectURL(spokenUrl)
+    spokenUrl = null
+    spokenKey = key
+    speaking.value = 'loading'
+    try {
+      spokenUrl = await blobUrl(`/api/submissions/${props.id}/viva/speech`)
+    } catch {
+      spokenKey = null
+    }
+    if (questionKey.value !== key || speaking.value !== 'loading') return // moved on or cancelled meanwhile
+  }
+  if (!spokenUrl) return browserSpeak(text)
+  player ??= new Audio()
+  player.src = spokenUrl
+  player.onended = player.onerror = () => (speaking.value = '')
+  speaking.value = 'playing'
+  player.play().catch(() => browserSpeak(text))
 }
 
 function stopPrep() {
@@ -60,7 +158,7 @@ function stopPrep() {
 // Each new question gets a prep countdown; recording starts by itself when it runs out.
 function startPrep() {
   stopPrep()
-  if (!micSupported || typing.value) return
+  if (!micSupported || typing.value || canType.value) return
   prepLeft.value = PREP_SECONDS
   prepTimer = setInterval(() => {
     prepLeft.value--
@@ -74,19 +172,25 @@ function startPrep() {
 const questionKey = computed(() =>
   state.value?.consent_given && current.value ? `${current.value.question_index}-${current.value.kind}` : null,
 )
-watch(questionKey, (key) => (key ? startPrep() : stopPrep()))
+watch(questionKey, (key) => {
+  stopSpeaking()
+  key ? startPrep() : stopPrep()
+})
 watch(typing, (t) => t && stopPrep())
 
 async function startRec() {
   stopPrep()
   if (phase.value !== 'idle') return
+  stopSpeaking() // don't record the question being read out
   error.value = ''
   phase.value = 'starting'
   try {
     rec = await startRecording({ video: true })
   } catch {
     phase.value = 'idle'
-    error.value = 'Could not access your microphone. Allow mic access in your browser, or type your answer instead.'
+    error.value = canType.value
+      ? 'Could not access your microphone. Allow mic access in your browser, or type your answer instead.'
+      : 'Could not access your microphone. Allow mic access in your browser and try again.'
     return
   }
   hasVideo.value = rec.hasVideo
@@ -141,7 +245,7 @@ async function send({ audio, text }) {
     lastTranscript.value = res.last_transcript
     state.value = res
     typed.value = ''
-    typing.value = false
+    typing.value = canType.value
   } catch (e) {
     error.value = e.message
     if (e.message.includes('already been answered')) await load()
@@ -152,8 +256,10 @@ async function send({ audio, text }) {
 
 onMounted(load)
 onUnmounted(() => {
+  clearInterval(pollTimer)
   cancelRec()
-  window.speechSynthesis?.cancel()
+  stopSpeaking()
+  if (spokenUrl) URL.revokeObjectURL(spokenUrl)
 })
 </script>
 
@@ -194,11 +300,57 @@ onUnmounted(() => {
           <p class="mt-1 text-slate-500">{{ state.total_questions }} questions about the methods and decisions in your own submission. Some may have one follow-up.</p>
         </div>
         <ul class="space-y-3 text-sm text-slate-700">
-          <li class="flex gap-3"><Icon name="mic" class="mt-0.5 text-indigo-500" /><span><b>Recording notice:</b> you get 1 minute to prepare for each question, then recording starts automatically (you can start sooner). Your camera is on while you answer; the video stays on your device and is not uploaded. Your spoken answers are recorded, transcribed by an AI service (Google Gemini), and stored so your instructor can listen and read the transcript.</span></li>
+          <li v-if="canType" class="flex gap-3"><Icon name="keyboard" class="mt-0.5 text-indigo-500" /><span><b>Typed answers:</b> your accommodation is approved, so you'll type your answers. They're assessed by an AI service (Google Gemini) and stored so your instructor can read them. You can still record an answer if you prefer.</span></li>
+          <li v-else class="flex gap-3"><Icon name="mic" class="mt-0.5 text-indigo-500" /><span><b>Recording notice:</b> you get 1 minute to prepare for each question, then recording starts automatically (you can start sooner). Your camera is on while you answer; the video stays on your device and is not uploaded. Your spoken answers are recorded, transcribed by an AI service (Google Gemini), and stored so your instructor can listen and read the transcript.</span></li>
           <li class="flex gap-3"><Icon name="chart" class="mt-0.5 text-indigo-500" /><span>The AI produces an <b>understanding score</b> your instructor reviews and can change. It's one part of your grade, next to a human grader's mark for your written solution. It doesn't judge accent, pauses, or phrasing — only content.</span></li>
-          <li class="flex gap-3"><Icon name="keyboard" class="mt-0.5 text-indigo-500" /><span>Prefer not to be recorded? You can type your answers instead.</span></li>
         </ul>
-        <button class="btn-primary w-full py-2.5 sm:w-auto" @click="consent">I understand — start<Icon name="arrow-right" /></button>
+
+        <!-- Accessibility accommodation: typed answers for the whole viva, decided before it starts -->
+        <div class="rounded-xl border border-slate-200 p-4 text-sm">
+          <template v-if="accommodation?.status === 'pending'">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="flex gap-3">
+                <span class="mt-1.5 size-2 shrink-0 animate-pulse rounded-full bg-amber-500"></span>
+                <div>
+                  <p class="font-medium text-slate-800">Typed-answer request sent — waiting for your instructor</p>
+                  <p class="mt-0.5 text-slate-500">You can start once they decide. This page updates by itself.</p>
+                </div>
+              </div>
+              <button class="btn-ghost btn-sm" @click="withdrawRequest">Withdraw &amp; answer by voice</button>
+            </div>
+          </template>
+          <template v-else-if="accommodation?.status === 'approved'">
+            <p class="flex items-center gap-2 font-medium text-emerald-700"><Icon name="check-circle" :size="16" />Typed answers approved for this viva</p>
+            <p v-if="accommodation.response" class="mt-1 text-slate-600">{{ accommodation.decided_by }}: “{{ accommodation.response }}”</p>
+          </template>
+          <template v-else>
+            <div v-if="accommodation?.status === 'denied'" class="mb-3 rounded-lg bg-rose-50 p-3 text-rose-800">
+              <p class="font-medium">Your typed-answer request wasn't approved, so this viva is by voice.</p>
+              <p v-if="accommodation.response" class="mt-1">{{ accommodation.decided_by }}: “{{ accommodation.response }}”</p>
+            </div>
+            <div v-if="!requestOpen" class="flex flex-wrap items-center justify-between gap-3">
+              <p class="flex gap-3 text-slate-600">
+                <Icon name="keyboard" class="mt-0.5 shrink-0 text-slate-400" />
+                <span>Have an accommodation that makes speaking difficult? Ask to <b>type your answers</b> for this whole viva. You need to ask before you start.</span>
+              </p>
+              <button class="btn-secondary btn-sm" @click="requestOpen = true">{{ accommodation?.status === 'denied' ? 'Ask again' : 'Request typed answers' }}</button>
+            </div>
+            <form v-else class="space-y-3" @submit.prevent="requestTyped">
+              <label class="label" for="acc-reason">Why do you need typed answers?</label>
+              <textarea id="acc-reason" v-model="reason" class="input" rows="3" maxlength="2000" placeholder="e.g. Registered with disability services for a speech impairment"></textarea>
+              <p class="text-xs text-slate-500">Only your instructor sees this. You can't start the viva until they decide.</p>
+              <div class="flex justify-end gap-2">
+                <button type="button" class="btn-secondary btn-sm" @click="requestOpen = false">Cancel</button>
+                <button class="btn-primary btn-sm" :disabled="!reason.trim() || requesting">{{ requesting ? 'Sending…' : 'Send request' }}</button>
+              </div>
+            </form>
+          </template>
+        </div>
+
+        <p v-if="!micSupported && !canType" class="text-sm text-rose-700">This browser can't record audio. Open the viva in an up-to-date Chrome, Edge, Firefox or Safari.</p>
+        <button class="btn-primary w-full py-2.5 sm:w-auto" :disabled="accommodation?.status === 'pending' || requestOpen || (!micSupported && !canType)" @click="consent">
+          I understand — start<Icon name="arrow-right" />
+        </button>
       </div>
 
       <!-- Done -->
@@ -228,7 +380,7 @@ onUnmounted(() => {
 
         <div v-if="lastTranscript" class="flex gap-2.5 rounded-xl bg-white p-3.5 text-sm text-slate-600 ring-1 ring-slate-200">
           <Icon name="check-circle" class="mt-0.5 text-emerald-500" />
-          <span><span class="font-medium text-slate-800">We heard:</span> “{{ lastTranscript }}”</span>
+          <span><span class="font-medium text-slate-800">{{ canType ? 'We got:' : 'We heard:' }}</span> “{{ lastTranscript }}”</span>
         </div>
 
         <div class="card space-y-8 p-7">
@@ -237,7 +389,10 @@ onUnmounted(() => {
               <span class="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700">
                 <Icon name="sparkles" :size="12" />{{ current.kind === 'followup' ? 'Follow-up' : 'Question' }}
               </span>
-              <button class="btn-ghost btn-sm" @click="speak"><Icon name="volume" :size="14" />Read aloud</button>
+              <button class="btn-ghost btn-sm" :disabled="phase !== 'idle'" @click="speak">
+                <span v-if="speaking === 'loading'" class="size-3.5 animate-spin rounded-full border-2 border-slate-200 border-t-slate-600"></span>
+                <Icon v-else :name="speaking === 'playing' ? 'stop' : 'volume'" :size="14" />{{ speaking ? 'Stop' : 'Read aloud' }}
+              </button>
             </div>
             <p class="text-xl leading-relaxed font-medium tracking-tight text-slate-900">{{ current.question }}</p>
           </div>
@@ -294,7 +449,7 @@ onUnmounted(() => {
             </div>
             <div class="flex flex-col items-center gap-2 border-t border-slate-100 pt-5 text-center">
               <p class="text-xs text-slate-500">Use the minute to think it through, then speak naturally — up to 3 minutes per answer.</p>
-              <button v-if="phase === 'idle'" class="btn-ghost btn-sm" @click="typing = true"><Icon name="keyboard" :size="14" />Type instead</button>
+              <button v-if="phase === 'idle' && canType" class="btn-ghost btn-sm" @click="typing = true"><Icon name="keyboard" :size="14" />Type instead</button>
             </div>
           </template>
 

@@ -1,11 +1,14 @@
+from collections import OrderedDict
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pymongo.errors import DuplicateKeyError
 
 from .. import audio as audio_codec
 from .. import db, gemini, pipeline, storage
 from ..access import load_submission
+from . import accommodations
 from ..auth import current_user, student
 from ..config import settings
 
@@ -26,6 +29,8 @@ async def _state(sub: dict) -> dict:
         "total_questions": len(sub.get("questions", [])),
         "answered_questions": len({t["question_index"] for t in turns if t["kind"] == "main"}),
         "current": step,
+        # Typed answers are an accommodation: only available once an instructor approves a request.
+        "accommodation": accommodations.out(await accommodations.for_submission(sub)),
     }
 
 
@@ -53,11 +58,42 @@ async def viva_state(submission_id: str, user: dict = Depends(student)):
     return await _state(sub)
 
 
+# Spoken questions, kept in memory only (not in Mongo) so replaying "Read aloud" doesn't call Gemini again.
+_speech_cache: OrderedDict[str, bytes] = OrderedDict()
+SPEECH_CACHE_SIZE = 100
+
+
+@router.get("/submissions/{submission_id}/viva/speech")
+async def question_speech(submission_id: str, user: dict = Depends(student)):
+    """The student's current question read aloud. Only ever speaks that question, so it can't be used as a general TTS."""
+    sub, _, _ = await load_submission(user, submission_id)
+    turns = await db.viva_turns.find({"submission_id": sub["_id"]}).to_list(None)
+    step = pipeline.current_step(sub, turns) if sub["status"] in (pipeline.READY, pipeline.IN_PROGRESS) else None
+    if not step:
+        raise HTTPException(404, "No question to read")
+    text = step["question"]
+    wav = _speech_cache.get(text)
+    if wav is None:
+        try:
+            wav = await gemini.speak(text)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, f"Could not generate speech ({str(e)[:200]})")
+        _speech_cache[text] = wav
+        if len(_speech_cache) > SPEECH_CACHE_SIZE:
+            _speech_cache.popitem(last=False)
+    else:
+        _speech_cache.move_to_end(text)
+    return Response(content=wav, media_type="audio/wav", headers={"Cache-Control": "private, max-age=3600"})
+
+
 @router.post("/submissions/{submission_id}/viva/consent")
 async def give_consent(submission_id: str, user: dict = Depends(student)):
     sub, _, _ = await load_submission(user, submission_id)
     if pipeline.pages_pending(sub):
         raise HTTPException(400, "Confirm which pages answer each question first")
+    req = await accommodations.for_submission(sub)
+    if req and req["status"] == accommodations.PENDING:
+        raise HTTPException(400, "Your accommodation request is still waiting for your instructor. Withdraw it to answer by voice.")
     if sub.get("consent_at") is None:
         await db.submissions.update_one({"_id": sub["_id"]}, {"$set": {"consent_at": db.now()}})
         sub["consent_at"] = db.now()
@@ -95,6 +131,8 @@ async def answer(
         audio_mime = (audio.content_type or "audio/wav").split(";")[0]
     elif not (text and text.strip()):
         raise HTTPException(400, "Record an answer or type one")
+    elif not await accommodations.typed_allowed(sub):
+        raise HTTPException(403, "Typed answers need an approved accommodation request. Please record your answer.")
 
     main_turn = next((t for t in turns if t["question_index"] == question_index and t["kind"] == "main"), None)
     try:

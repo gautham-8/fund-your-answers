@@ -129,10 +129,13 @@ async def list_courses(user: dict = Depends(current_user)):
         by_course[a["course_id"]].append(a)
 
     open_regrades: Counter = Counter()
+    pending_acc: Counter = Counter()
     done_ids: set = set()
     if is_inst:
         async for r in db.regrade_requests.find({"course_id": {"$in": ids}, "status": "open"}, {"course_id": 1}):
             open_regrades[r["course_id"]] += 1
+        async for r in db.accommodation_requests.find({"course_id": {"$in": ids}, "status": "pending"}, {"course_id": 1}):
+            pending_acc[r["course_id"]] += 1
     else:
         subs = await db.submissions.find(
             {"student_id": user["_id"], "assignment_id": {"$in": [a["_id"] for a in asgs]}, "status": {"$in": list(DONE)}},
@@ -152,6 +155,7 @@ async def list_courses(user: dict = Depends(current_user)):
         item["next_due"] = upcoming[0] if upcoming else None
         if is_inst:
             item["open_regrades"] = open_regrades[c["_id"]]
+            item["pending_accommodations"] = pending_acc[c["_id"]]
         else:
             item["todo_count"] = len(upcoming)
         out.append(item)
@@ -259,6 +263,10 @@ async def get_course(course_id: str, user: dict = Depends(current_user)):
     names = await _instructor_names([course])
     out = _course_out(course, user, names.get(course["instructor_id"]))
     out["open_regrades"] = sum(open_regrades.values())
+    if is_inst:
+        out["pending_accommodations"] = await db.accommodation_requests.count_documents(
+            {"course_id": course["_id"], "status": "pending"}
+        )
     out["assignments"] = []
     for a in assignments:
         item = {

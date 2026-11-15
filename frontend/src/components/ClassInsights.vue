@@ -117,7 +117,7 @@ defineExpose({ load })
             <div class="flex items-start justify-between gap-3">
               <h4 class="font-medium">{{ g.concept }}</h4>
               <span class="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800">
-                {{ g.student_count }} of {{ data.concept_gaps.based_on }} students
+                {{ Math.round((g.student_count / data.concept_gaps.based_on) * 100) }}% · {{ g.student_count }} of {{ data.concept_gaps.based_on }} students
               </span>
             </div>
             <p class="mt-1 text-sm text-slate-600">{{ g.explanation }}</p>

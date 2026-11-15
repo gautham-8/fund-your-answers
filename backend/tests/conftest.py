@@ -85,7 +85,9 @@ class FakeGemini:
         labels = list(students)
         return gemini.ClassInsights(overview="Mixed.", gaps=[gemini.ConceptGap(
             concept="Pivot choice", explanation="Vague.", students=labels + ["Student ZZ"],  # ZZ must be dropped
-            example_quote="answer about pivots", teaching_suggestion="Demo sorted input.")])
+            example_quote="answer about pivots", teaching_suggestion="Demo sorted input."), gemini.ConceptGap(
+            concept="Stability", explanation="Unsure.", students=labels[:1],
+            example_quote="", teaching_suggestion="Show equal keys.")])
 
 
 @pytest.fixture(scope="session")

@@ -13,12 +13,14 @@ export function usePdfPages({ width = 1400 } = {}) {
   const images = ref([])
   const count = ref(0)
   let pdf = null
+  let task = null
   let url = null
   let alive = true
 
   async function open(path) {
     url = await blobUrl(path)
-    pdf = await getDocument({ url }).promise
+    task = getDocument({ url })
+    pdf = await task.promise
     count.value = pdf.numPages
     images.value = Array(pdf.numPages).fill(null)
     return pdf.numPages
@@ -50,7 +52,9 @@ export function usePdfPages({ width = 1400 } = {}) {
     alive = false
     images.value.forEach((u) => u && URL.revokeObjectURL(u))
     if (url) URL.revokeObjectURL(url)
-    pdf?.destroy()
+    // pdf.js v6 only has destroy() on the loading task (not the document). It also cancels a load still in
+    // progress. Never let cleanup throw: an error in an unmount hook stops the next page from rendering.
+    task?.destroy().catch(() => {})
   })
 
   return { images, count, open, render, renderAll }

@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 
 from . import db
 from .config import settings
-from .routers import auth_routes, courses, insights, regrades, submissions, viva
+from .routers import accommodations, auth_routes, courses, insights, regrades, submissions, viva
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,7 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (auth_routes, courses, submissions, regrades, viva, insights):
+for r in (auth_routes, courses, submissions, regrades, accommodations, viva, insights):
     app.include_router(r.router)
 
 

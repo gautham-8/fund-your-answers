@@ -46,7 +46,7 @@ Registration is open on the live demo, so you can play both roles:
 1. **As an instructor:** register with the *Instructor* role, create a class, and copy its join code. Create an
    assignment: upload a handout PDF (or type a couple of questions with points).
 2. **As a student:** in a private window, register with the *Student* role, join with the code, open the assignment and
-   upload a PDF answering it. Confirm the answer pages, then take the viva (allow the microphone, or type answers).
+   upload a PDF answering it. Confirm the answer pages, then take the viva (allow the microphone and camera).
 3. **Back as the instructor:** open the submission's report to see the scores, evidence and conversation. Click
    **Grade** to mark the written solution, then **Publish grades** on the assignment.
 4. **As the student again:** see the final grade, per-question marks and comments, and request a regrade on any score.
@@ -56,7 +56,7 @@ To see what happens with a wrong upload, submit a PDF that has nothing to do wit
 ## Features
 
 **For instructors**
-- **Classes:** course code, term, a 6-character join code and a one-click invite link; roster management.
+- **Classes:** course code, term, a 6-character join code and a one-click invite link; a Students list to manage who's enrolled.
 - **Assignments:** release date (hidden until then), due date and an optional late window (late work is accepted and
   marked *Late*). Questions with points, and a viva rubric, both drafted by the AI from the handout.
 - **Grading viewer:** the student's pages one at a time (zoom, rotate, all-pages grid) beside the questions. Clicking a
@@ -68,10 +68,16 @@ To see what happens with a wrong upload, submit a PDF that has nothing to do wit
 - **Regrade requests:** students ask about one rubric item; the instructor answers and optionally changes the score.
 - **Class insights:** average scores per rubric dimension, how often and by how much instructors overrode the AI, and
   the concepts several students struggled to explain, as teaching suggestions (anonymised before going to the AI).
+- **What to revisit:** a class-wide *Insights* tab ranks the concept gaps from every assignment by the share of the
+  class affected ("67% struggled with pivot choice in Sorting"), and re-analyses assignments with new vivas in one click.
+- **Accommodations:** approve or deny students' requests to type their viva answers instead of speaking.
 
 **For students**
 - Upload, check and fix the AI's page matching (reorder or rotate pages too), then take the viva when ready.
-- A consent notice before any recording.
+- A consent notice before any recording, a 1-minute countdown to prepare for each question, and *Read aloud* in a
+  natural voice. The camera is on while answering but the video never leaves the device.
+- **Accessibility:** vivas are spoken by default. A student with an accommodation can ask to type their answers for the
+  whole viva; they ask before starting, and the instructor approves it.
 - After grades are published: the final grade, marks and comments per question, viva feedback, and regrade requests.
 
 ## Fairness and safety
@@ -161,10 +167,10 @@ uv pip install -p .venv -r requirements-dev.txt
 mongod --dbpath /tmp/viva-test-db --fork --logpath /tmp/viva-test-db.log   # tests need a local MongoDB
 .venv/bin/pytest
 ```
-Gemini is stubbed and each run uses a throwaway database. 14 tests cover auth and lockout, roles and rosters, release,
+Gemini is stubbed and each run uses a throwaway database. 17 tests cover auth and lockout, roles and rosters, release,
 due and late dates, the full viva flow (follow-ups, scoring, needs-review rules, files, MP3 compression, access control,
 overrides), page matching, the relevance check and instructor override, handout extraction, the 0–5 scale, question
-points and per-question grading, final-grade weighting, publishing, regrade requests and class insights.
+points and per-question grading, final-grade weighting, publishing, regrade requests, class and course-wide insights, and typed-answer accommodations.
 
 ## Deployment
 
@@ -200,7 +206,7 @@ backend/app/
 backend/scripts/seed_demo.py    demo data
 backend/tests/                  pytest suite (Gemini stubbed)
 frontend/src/
-  views/                        Login, Dashboard, Join, Course (assignments, regrades, roster), Assignment,
+  views/                        Login, Dashboard, Join, Course (assignments, regrades, insights, accommodations, students), Assignment,
                                 Pages (student page matching), Viva, Grade (grading viewer), Report
   components/                   sidebar, assignment form, class insights, status badges, modals, toasts
   lib/                          API client, auth state, recorder (MediaRecorder → WAV), pdf.js page renderer

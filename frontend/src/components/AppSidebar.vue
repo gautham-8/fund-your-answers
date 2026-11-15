@@ -25,7 +25,11 @@ function courseLinks(c) {
     { to: base, label: 'Assignments', icon: 'file', exact: true },
     { to: `${base}/regrades`, label: 'Regrade requests', icon: 'regrade', badge: c.open_regrades },
   ]
-  if (isInstructor.value) links.push({ to: `${base}/roster`, label: 'Roster', icon: 'users', badge: null })
+  if (isInstructor.value) {
+    links.push({ to: `${base}/insights`, label: 'Insights', icon: 'chart', badge: null })
+    links.push({ to: `${base}/accommodations`, label: 'Accommodations', icon: 'keyboard', badge: c.pending_accommodations })
+    links.push({ to: `${base}/students`, label: 'Students', icon: 'users', badge: null })
+  }
   return links
 }
 
@@ -106,7 +110,7 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
               {{ courseMonogram(c) }}
             </span>
             <span v-if="!mini" class="min-w-0 flex-1 truncate">{{ c.code || c.name }}</span>
-            <span v-if="!mini && c.open_regrades" class="rounded-full bg-orange-100 px-1.5 text-[10px] font-semibold text-orange-700">{{ c.open_regrades }}</span>
+            <span v-if="!mini && (c.open_regrades || c.pending_accommodations)" class="rounded-full bg-orange-100 px-1.5 text-[10px] font-semibold text-orange-700">{{ (c.open_regrades || 0) + (c.pending_accommodations || 0) }}</span>
           </RouterLink>
 
           <!-- Sub-navigation for the class being viewed -->
