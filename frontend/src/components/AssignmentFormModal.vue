@@ -22,6 +22,13 @@ const busy = ref(false)
 const brief = ref(null) // the handout PDF chosen in this dialog
 const extracting = ref(false)
 const extracted = ref(false)
+const dragging = ref(false)
+
+function onDrop(e) {
+  dragging.value = false
+  if (extracting.value) return
+  pickBrief(e.dataTransfer.files[0])
+}
 
 watch(
   () => props.open,
@@ -140,7 +147,10 @@ async function submit() {
     <form id="assignment-form" class="space-y-5" @submit.prevent="submit">
       <label
         class="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed p-4 transition"
-        :class="brief ? 'border-emerald-300 bg-emerald-50/50' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'"
+        :class="dragging ? 'border-indigo-400 bg-indigo-50' : brief ? 'border-emerald-300 bg-emerald-50/50' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'"
+        @dragover.prevent="dragging = true"
+        @dragleave.prevent="dragging = false"
+        @drop.prevent="onDrop"
       >
         <input type="file" accept="application/pdf" class="sr-only" :disabled="extracting" @change="pickBrief($event.target.files[0])" />
         <span class="grid size-10 shrink-0 place-items-center rounded-lg" :class="brief ? 'bg-emerald-100 text-emerald-600' : 'bg-indigo-50 text-indigo-600'">
@@ -152,7 +162,7 @@ async function submit() {
             <template v-if="extracting">Reading {{ brief.name }}…</template>
             <template v-else-if="brief">{{ brief.name }}</template>
             <template v-else-if="assignment?.has_brief">Replace the assignment handout <span class="font-normal text-slate-500">({{ assignment.brief_filename }})</span></template>
-            <template v-else>Upload the assignment handout (PDF)</template>
+            <template v-else>Upload or drop the assignment handout (PDF)</template>
           </span>
           <span class="block text-xs text-slate-500">
             <template v-if="extracted">Questions and a draft rubric were filled in below. Check and edit them.</template>
