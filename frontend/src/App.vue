@@ -44,8 +44,8 @@ watch(() => route.fullPath, () => (mobileOpen.value = false))
       <header class="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-slate-200/80 bg-white/80 px-4 backdrop-blur lg:hidden">
         <button class="icon-btn -ml-1" aria-label="Open menu" @click="mobileOpen = true"><Icon name="menu" :size="18" /></button>
         <RouterLink to="/" class="flex items-center gap-2">
-          <span class="grid size-7 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-xs font-bold text-white">V</span>
-          <span class="font-semibold tracking-tight">Viva</span>
+          <span class="grid size-7 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-xs font-bold text-white">F</span>
+          <span class="font-semibold tracking-tight">Fund your answers</span>
         </RouterLink>
       </header>
       <main :class="route.meta.wide ? 'w-full px-3 py-3 sm:px-4 lg:py-4' : 'mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10'">

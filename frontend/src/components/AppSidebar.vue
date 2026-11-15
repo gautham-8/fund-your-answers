@@ -60,8 +60,8 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
     <!-- Brand -->
     <div class="flex h-16 shrink-0 items-center gap-2 px-4" :class="mini ? 'justify-center' : 'justify-between'">
       <RouterLink to="/" class="flex items-center gap-2.5" @click="emit('close')">
-        <span class="grid size-8 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white shadow-sm shadow-indigo-500/30">V</span>
-        <span v-if="!mini" class="text-[15px] font-semibold tracking-tight">Viva</span>
+        <span class="grid size-8 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white shadow-sm shadow-indigo-500/30">F</span>
+        <span v-if="!mini" class="text-[15px] font-semibold tracking-tight">Fund your answers</span>
       </RouterLink>
       <button v-if="!mini" class="icon-btn hidden lg:inline-flex" title="Collapse sidebar" @click="emit('toggle')"><Icon name="panel" /></button>
       <button v-if="mobileOpen" class="icon-btn lg:hidden" aria-label="Close menu" @click="emit('close')"><Icon name="x" /></button>

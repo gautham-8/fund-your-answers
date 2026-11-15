@@ -1,4 +1,4 @@
-# Viva — check that students understand their own work
+# Fund your answers — check that students understand their own work
 
 Instructors create classes and assignments; students submit a PDF and then do a short **voice viva**. Gemini reads
 the PDF, finds the methods and design decisions the student used, asks about *those specific choices*, follows up on
@@ -170,7 +170,7 @@ frontend/src/
 <details>
 <summary>The hackathon spec this was built from</summary>
 
-### Build: "Viva" — verify student understanding with a short voice viva
+### Build: "Fund your answers" — verify student understanding with a short voice viva
 
 Build a hackathon web app (3 days). Keep it simple and demo-ready. Make reasonable choices yourself and don't over-engineer.
 

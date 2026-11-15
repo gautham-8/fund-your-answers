@@ -48,8 +48,8 @@ const FEATURES = [
       <div class="pointer-events-none absolute -top-40 -left-40 size-[36rem] rounded-full bg-indigo-600/30 blur-3xl"></div>
       <div class="pointer-events-none absolute -right-32 -bottom-48 size-[32rem] rounded-full bg-violet-600/25 blur-3xl"></div>
       <div class="relative flex items-center gap-2.5">
-        <span class="grid size-9 place-items-center rounded-xl bg-linear-to-br from-indigo-400 to-violet-500 font-bold">V</span>
-        <span class="text-lg font-semibold tracking-tight">Viva</span>
+        <span class="grid size-9 place-items-center rounded-xl bg-linear-to-br from-indigo-400 to-violet-500 font-bold">F</span>
+        <span class="text-lg font-semibold tracking-tight">Fund your answers</span>
       </div>
       <div class="relative max-w-md">
         <h1 class="text-4xl leading-tight font-semibold tracking-tight">Check that students understand the work they hand in.</h1>
@@ -67,12 +67,12 @@ const FEATURES = [
     <section class="flex items-center justify-center px-5 py-12">
       <div class="w-full max-w-sm animate-fade-up">
         <div class="mb-8 flex items-center gap-2 lg:hidden">
-          <span class="grid size-8 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white">V</span>
-          <span class="font-semibold tracking-tight">Viva</span>
+          <span class="grid size-8 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white">F</span>
+          <span class="font-semibold tracking-tight">Fund your answers</span>
         </div>
         <h2 class="text-2xl font-semibold tracking-tight">{{ isRegister ? 'Create your account' : 'Welcome back' }}</h2>
         <p class="mt-1 text-sm text-slate-500">
-          {{ fromInvite ? 'Sign in or create an account to join the class.' : isRegister ? 'It takes less than a minute.' : 'Sign in to continue to Viva.' }}
+          {{ fromInvite ? 'Sign in or create an account to join the class.' : isRegister ? 'It takes less than a minute.' : 'Sign in to continue to Fund your answers.' }}
         </p>
 
         <form class="mt-8 space-y-4" @submit.prevent="submit">
