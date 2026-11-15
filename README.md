@@ -15,21 +15,37 @@ minute to wake up).
 
 - **Classes** — course code, name and term (dashboard groups classes by term). Instructors get a 6-character join code
   (click to copy) and a one-click invite link (`/join/CODE`); they can manage the roster. Students can unenroll.
+- **Assignment handout** — instructors can upload the assignment PDF. Gemini pulls out its questions and drafts a viva
+  rubric for that assignment; both stay editable before saving. The handout is shown to students and sent to Gemini
+  with every submission.
 - **Assignments** — title, description, rubric, and a schedule: **release date** (hidden from students until then),
   **due date**, and optional **late due date** (submissions in between are accepted and marked *Late*). Sortable
   assignment table with time-left bars, and an "Up next" list of deadlines across classes.
 - **Grades & regrades** — instructors publish grades per assignment; students then see their score, feedback and
   instructor notes, and can request a regrade on any rubric item. Instructors resolve requests (optionally changing
   the score) from the class's *Regrade requests* page.
-- **PDF analysis** — on upload, Gemini lists methods and decisions with page numbers, then writes 4 questions.
+- **Relevance check** — on upload, Gemini first checks the PDF is a genuine attempt at this assignment's questions.
+  If not (unrelated file, a different assignment, blank), no viva opens: the student is told why and can re-upload,
+  and the instructor can let it through if the AI got it wrong.
+- **PDF analysis** — Gemini lists methods and decisions (tied to the assignment question they answer) with page
+  numbers, then writes 4 questions about how the student answered the assignment.
 - **Answer pages** — instructors can list the assignment's questions. The same Gemini call picks the PDF pages that
   answer each one; the student checks and fixes the pages on rendered page images (and can reorder or rotate pages),
   then confirms before the viva opens. The report shows them.
 - **Voice viva** — consent notice first; record (or type) each answer. Gemini transcribes and judges in one call and
   asks at most one follow-up per question, based on the actual answer.
-- **Scoring** — each rubric dimension gets a 1–5 score, an exact quote as evidence and a confidence. The server checks
+- **Scoring** — each rubric dimension gets a 0–5 score (0 = no understanding shown, e.g. "I don't know"; 5 = correct
+  and explains their reasoning, not "perfect"), an exact quote as evidence and a confidence. The server checks
   the quote really appears in the transcript; unverified quotes or low confidence → **needs review**.
-- **Instructor report** — transcript, audio playback, analysis, PDF, scores with evidence, per-dimension overrides.
+- **Grading viewer** — Gradescope-style: the student's pages one at a time (zoom, rotate, all-pages grid) next to
+  the assignment's questions. Clicking a question jumps to its first page; the grader enters points and a comment per
+  question and the total adds up as they go (⌘S saves, "Next student" moves on). Students get the same view
+  read-only, with marks and comments once grades are published.
+- **Question points** — each assignment question has points (read from the handout when it states them). They add up
+  to what the written solution is marked out of, and can be changed after the assignment is created.
+- **Final grade** — the viva only measures understanding. A human grader marks the written solution in the grading viewer, and the final grade is `(1 − w) × grader % + w × viva %`, where the viva
+  weight `w` is set per assignment (default 30%, changeable any time).
+- **Instructor report** — transcript, audio playback, analysis, PDF, grader's mark, scores with evidence, per-dimension overrides.
 - **Class insights** — average rubric scores, how often instructors changed the AI's scores and by how much, and
   "concepts the class struggled to explain" (anonymised before it is sent to Gemini).
 
@@ -52,7 +68,7 @@ FastAPI (one Docker container on Render; also serves the built frontend)
 | Collection | Holds |
 |---|---|
 | `users`, `courses`, `assignments` | accounts (bcrypt hashes), classes + join codes + roster, assignments + rubric + cached class gaps |
-| `submissions` | status, PDF analysis, the 4 questions, answer pages per assignment question, page order and rotation, consent time, overall score |
+| `submissions` | status, PDF analysis + relevance check, the 4 questions, answer pages per assignment question, page order and rotation, consent time, viva score (`overall`), grader's points |
 | `viva_turns` | question, transcript, quality notes, follow-up, link to the audio file |
 | `scores` | per-dimension score, evidence quote, confidence, overrides |
 | `regrade_requests` | student's message about one rubric item, status, instructor response, score before/after |

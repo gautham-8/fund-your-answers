@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     num_questions: int = 4
     # Below this confidence (0-1) a rubric score is flagged "needs review".
     review_confidence_threshold: float = 0.6
+    # Share of the final grade that comes from the viva (the rest is the grader's mark); instructors change it per assignment.
+    default_viva_weight: float = 0.3
 
 
 settings = Settings()

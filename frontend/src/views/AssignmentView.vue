@@ -1,9 +1,9 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '../lib/api'
+import { api, blobUrl } from '../lib/api'
 import { auth } from '../lib/auth'
-import { dueState, fmtDate, humanize, initials, now, relative, scoreTone, tzAbbr } from '../lib/format'
+import { dueState, fmtDate, fmtPts, humanize, initials, now, relative, scoreTone, tzAbbr } from '../lib/format'
 import { loadCourses, setCourse } from '../lib/store'
 import { toast } from '../lib/toast'
 import AssignmentFormModal from '../components/AssignmentFormModal.vue'
@@ -50,14 +50,14 @@ async function load() {
 // ---------- Student ----------
 
 const canUpload = computed(
-  () => a.value?.accepting_submissions && (!mySub.value || ['analyzing', 'analysis_failed', 'ready'].includes(mySub.value.status)),
+  () => a.value?.accepting_submissions && (!mySub.value || ['analyzing', 'analysis_failed', 'off_topic', 'ready'].includes(mySub.value.status)),
 )
 
 const STEPS = ['Submit PDF', 'AI reads it', 'Viva', 'Scoring', 'Grade']
 const step = computed(() => {
   const s = mySub.value?.status
   if (!s) return 0
-  if (s === 'analyzing' || s === 'analysis_failed') return 1
+  if (s === 'analyzing' || s === 'analysis_failed' || s === 'off_topic') return 1
   if (s === 'ready' || s === 'viva_in_progress') return 2
   if (s === 'scoring' || s === 'scoring_failed') return 3
   return results.value ? 5 : 4
@@ -93,6 +93,12 @@ async function upload() {
     uploading.value = false
   }
 }
+
+async function openBrief() {
+  window.open(await blobUrl(`/api/assignments/${props.id}/brief`), '_blank')
+}
+
+const pct = (x) => `${Math.round(x * 100)}%`
 
 async function retry(subId) {
   try {
@@ -139,6 +145,7 @@ const stats = computed(() => {
   const subs = a.value?.submissions || []
   const done = subs.filter((s) => s.status === 'completed')
   const scored = done.filter((s) => s.overall != null)
+  const finals = subs.filter((s) => s.final != null)
   return {
     submitted: subs.length,
     total: a.value?.student_count || 0,
@@ -146,12 +153,17 @@ const stats = computed(() => {
     review: done.filter((s) => s.needs_review).length,
     late: subs.filter((s) => s.late).length,
     avg: scored.length ? Math.round(scored.reduce((t, s) => t + s.overall, 0) / scored.length) : null,
+    avgFinal: finals.length ? Math.round(finals.reduce((t, s) => t + s.final, 0) / finals.length) : null,
+    ungraded: done.filter((s) => s.grader_points == null).length,
+    offTopic: subs.filter((s) => s.status === 'off_topic').length,
     regrades: subs.reduce((t, s) => t + (s.open_regrades || 0), 0),
   }
 })
 const FILTERS = [
   ['all', 'All'],
   ['review', 'Needs review'],
+  ['ungraded', 'Not graded'],
+  ['off_topic', "Doesn't match"],
   ['completed', 'Completed'],
   ['progress', 'In progress'],
   ['missing', 'Missing'],
@@ -162,6 +174,8 @@ const shown = computed(() => {
     if (term && !`${p.student?.name} ${p.student?.email}`.toLowerCase().includes(term)) return false
     switch (filter.value) {
       case 'review': return p.status === 'completed' && p.needs_review
+      case 'ungraded': return p.status === 'completed' && p.grader_points == null
+      case 'off_topic': return p.status === 'off_topic'
       case 'completed': return p.status === 'completed'
       case 'progress': return p.status && p.status !== 'completed'
       case 'missing': return p.missing
@@ -173,6 +187,8 @@ const filterCount = (k) =>
   ({
     all: people.value.length,
     review: stats.value.review,
+    ungraded: stats.value.ungraded,
+    off_topic: stats.value.offTopic,
     completed: stats.value.completed,
     progress: stats.value.submitted - stats.value.completed,
     missing: a.value?.missing.length || 0,
@@ -288,7 +304,9 @@ onUnmounted(() => {
         <section v-if="a.parts?.length" class="card">
           <h2 class="eyebrow mb-2">Questions</h2>
           <ol class="list-decimal space-y-1.5 pl-5 leading-relaxed text-slate-700">
-            <li v-for="(q, i) in a.parts" :key="i" class="whitespace-pre-line">{{ q }}</li>
+            <li v-for="(q, i) in a.parts" :key="i" class="whitespace-pre-line">
+              {{ q }} <span v-if="a.part_points?.[i] != null" class="text-xs font-medium whitespace-nowrap text-slate-400">· {{ fmtPts(a.part_points[i]) }} pts</span>
+            </li>
           </ol>
         </section>
 
@@ -314,6 +332,11 @@ onUnmounted(() => {
                 <div class="truncate text-sm font-medium">{{ mySub.filename }}</div>
                 <div class="text-xs text-slate-500">Submitted {{ relative(mySub.created_at) }}<span v-if="mySub.late" class="text-orange-600"> · late</span></div>
               </div>
+              <RouterLink
+                v-if="!mySub.pages_pending && !['analyzing', 'analysis_failed'].includes(mySub.status)"
+                :to="`/submissions/${mySub.id}/grade`"
+                class="btn-secondary btn-sm"
+              ><Icon name="eye" :size="14" />{{ results?.question_grades ? 'View graded pages' : 'View pages' }}</RouterLink>
             </div>
 
             <div v-if="mySub?.status === 'analyzing'" class="flex items-center gap-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-900">
@@ -323,6 +346,11 @@ onUnmounted(() => {
             <div v-if="mySub?.status === 'analysis_failed'" class="error-box">
               We couldn't analyze your PDF. <button class="font-medium underline" @click="retry(mySub.id)">Try again</button> or upload a different file.
               <div v-if="mySub.error" class="mt-1 text-xs opacity-80">{{ mySub.error }}</div>
+            </div>
+            <div v-if="mySub?.status === 'off_topic'" class="error-box space-y-1">
+              <p class="font-medium">Your PDF doesn't seem to answer this assignment's questions, so the viva hasn't opened.</p>
+              <p v-if="mySub.relevance_note" class="text-sm">{{ mySub.relevance_note }}</p>
+              <p class="text-sm">Upload the right file below. If you think this is a mistake, ask your instructor. They can let it through.</p>
             </div>
             <div v-if="mySub?.status === 'ready' && mySub.pages_pending" class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
               <div class="max-w-md">
@@ -388,10 +416,25 @@ onUnmounted(() => {
           <!-- Results -->
           <section v-if="results" class="card space-y-6">
             <div class="flex flex-wrap items-center gap-6">
-              <ScoreRing :value="results.overall" :size="104" label="Score" />
+              <ScoreRing :value="results.overall ?? results.viva" :size="104" :label="results.overall != null ? 'Final' : 'Viva'" />
               <div class="min-w-0 flex-1">
                 <h2 class="font-semibold">Your results</h2>
                 <p class="mt-1 text-sm leading-relaxed text-slate-600">{{ results.summary }}</p>
+              </div>
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="rounded-xl border border-slate-200 p-4">
+                <div class="text-xs font-medium text-slate-500">Written solution · {{ pct(1 - results.viva_weight) }} of grade</div>
+                <div v-if="results.grader_points != null" class="mt-1 flex flex-wrap items-baseline justify-between gap-2">
+                  <span class="text-xl font-semibold">{{ fmtPts(results.grader_points) }}<span class="text-sm font-normal text-slate-400"> / {{ fmtPts(results.max_points) }}</span></span>
+                  <RouterLink v-if="results.question_grades" :to="`/submissions/${mySub.id}/grade`" class="text-sm font-medium text-indigo-600 hover:text-indigo-500">Marks per question →</RouterLink>
+                </div>
+                <div v-else class="mt-1 text-sm text-slate-500">Not graded yet</div>
+                <p v-if="results.grader_note" class="mt-2 text-sm whitespace-pre-line text-slate-700">{{ results.grader_note }}</p>
+              </div>
+              <div class="rounded-xl border border-slate-200 p-4">
+                <div class="text-xs font-medium text-slate-500">Viva (understanding) · {{ pct(results.viva_weight) }} of grade</div>
+                <div class="mt-1 text-xl font-semibold">{{ Math.round(results.viva) }}%</div>
               </div>
             </div>
             <div class="divide-y divide-slate-100 rounded-xl border border-slate-200">
@@ -450,8 +493,9 @@ onUnmounted(() => {
               <div v-if="stats.regrades" class="mt-1 text-xs text-orange-600">{{ stats.regrades }} open regrade{{ stats.regrades === 1 ? '' : 's' }}</div>
             </div>
             <div class="card p-4">
-              <div class="text-xs font-medium text-slate-500">Average score</div>
-              <div class="mt-1 text-2xl font-semibold tracking-tight">{{ stats.avg != null ? stats.avg + '%' : '—' }}</div>
+              <div class="text-xs font-medium text-slate-500">Average final grade</div>
+              <div class="mt-1 text-2xl font-semibold tracking-tight">{{ stats.avgFinal != null ? stats.avgFinal + '%' : '—' }}</div>
+              <div class="mt-1 text-xs text-slate-500">Viva avg {{ stats.avg != null ? stats.avg + '%' : '—' }}<span v-if="stats.ungraded" class="text-orange-600"> · {{ stats.ungraded }} not graded</span></div>
             </div>
           </div>
 
@@ -482,7 +526,8 @@ onUnmounted(() => {
                     <th class="th">Student</th>
                     <th class="th hidden md:table-cell">Submitted</th>
                     <th class="th">Status</th>
-                    <th class="th text-right">Score</th>
+                    <th class="th hidden text-right sm:table-cell">Viva</th>
+                    <th class="th text-right">Final</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">
@@ -512,13 +557,23 @@ onUnmounted(() => {
                         <Icon name="regrade" :size="11" />{{ p.open_regrades }}
                       </span>
                     </td>
+                    <td class="td hidden text-right font-mono text-slate-600 sm:table-cell">
+                      <span v-if="p.overall != null">{{ Math.round(p.overall) }}%</span>
+                      <span v-else class="text-slate-300">—</span>
+                    </td>
                     <td class="td text-right">
-                      <span v-if="p.overall != null" class="inline-flex rounded-lg px-2 py-0.5 font-mono text-sm font-semibold" :class="scoreTone(p.overall)">{{ Math.round(p.overall) }}%</span>
+                      <span v-if="p.final != null" class="inline-flex rounded-lg px-2 py-0.5 font-mono text-sm font-semibold" :class="scoreTone(p.final)">{{ Math.round(p.final) }}%</span>
+                      <RouterLink
+                        v-else-if="!p.missing && !['analyzing', 'analysis_failed'].includes(p.status)"
+                        :to="`/submissions/${p.id}/grade`"
+                        class="inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-indigo-200 ring-inset hover:bg-indigo-50"
+                        @click.stop
+                      ><Icon name="pencil" :size="11" />{{ p.questions_graded ? `${p.questions_graded}/${a.parts.length} graded` : 'Grade' }}</RouterLink>
                       <span v-else class="text-slate-300">—</span>
                     </td>
                   </tr>
                   <tr v-if="!shown.length">
-                    <td colspan="4" class="px-4 py-10 text-center text-sm text-slate-500">{{ people.length ? 'No students match.' : 'No students in this class yet.' }}</td>
+                    <td colspan="5" class="px-4 py-10 text-center text-sm text-slate-500">{{ people.length ? 'No students match.' : 'No students in this class yet.' }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -563,7 +618,25 @@ onUnmounted(() => {
               </div>
             </li>
           </ul>
-          <p class="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-400">Each dimension is scored 1–5.</p>
+          <p class="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-400">Each dimension is scored 0–5 in the viva. 0 means no understanding shown.</p>
+        </section>
+
+        <section class="card">
+          <h2 class="eyebrow mb-3">Grading</h2>
+          <div class="flex h-2 overflow-hidden rounded-full">
+            <div class="bg-slate-400" :style="{ width: pct(1 - a.viva_weight) }"></div>
+            <div class="bg-indigo-500" :style="{ width: pct(a.viva_weight) }"></div>
+          </div>
+          <ul class="mt-3 space-y-1.5 text-sm">
+            <li class="flex justify-between gap-2"><span class="flex items-center gap-2"><span class="size-2 rounded-full bg-slate-400"></span>Written solution (grader, out of {{ fmtPts(a.max_points) }})</span><b>{{ pct(1 - a.viva_weight) }}</b></li>
+            <li class="flex justify-between gap-2"><span class="flex items-center gap-2"><span class="size-2 rounded-full bg-indigo-500"></span>Viva (AI, reviewed)</span><b>{{ pct(a.viva_weight) }}</b></li>
+          </ul>
+          <p v-if="isInstructor" class="mt-3 border-t border-slate-100 pt-3 text-xs text-slate-400">Change the weighting under Edit.</p>
+        </section>
+
+        <section v-if="a.has_brief" class="card">
+          <h2 class="eyebrow mb-3">Assignment handout</h2>
+          <button class="btn-secondary btn-sm w-full" @click="openBrief"><Icon name="file" :size="14" />{{ a.brief_filename || 'Assignment PDF' }}<Icon name="external" :size="12" class="text-slate-400" /></button>
         </section>
       </aside>
     </div>
@@ -573,7 +646,7 @@ onUnmounted(() => {
     <Modal
       :open="regrade.open"
       title="Request a regrade"
-      :description="regrade.index != null && results ? `${results.dimensions[regrade.index].dimension} · currently ${results.dimensions[regrade.index].score}/5` : ''"
+      :description="regrade.index != null && results ? `${results.dimensions[regrade.index].dimension} · currently ${results.dimensions[regrade.index].score}/${results.dimensions[regrade.index].max}` : ''"
       @close="regrade.open = false"
     >
       <form id="regrade-form" @submit.prevent="sendRegrade">

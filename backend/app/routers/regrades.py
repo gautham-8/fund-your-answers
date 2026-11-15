@@ -21,8 +21,8 @@ class RegradeIn(BaseModel):
 class RegradeResolveIn(BaseModel):
     status: Literal["resolved", "open"] = "resolved"
     response: str = Field(default="", max_length=2000)
-    # Optionally change the score while resolving (1-5); None leaves it as it is.
-    override_score: int | None = Field(default=None, ge=1, le=5)
+    # Optionally change the score while resolving (0-5); None leaves it as it is.
+    override_score: int | None = Field(default=None, ge=0, le=pipeline.SCORE_MAX)
 
 
 def _final(d: dict) -> int:

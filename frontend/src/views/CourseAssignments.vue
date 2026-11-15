@@ -24,7 +24,7 @@ const FILTERS = isInstructor
   ? [['all', 'All'], ['active', 'Open'], ['scheduled', 'Scheduled'], ['closed', 'Closed']]
   : [['all', 'All'], ['todo', 'To do'], ['done', 'Done']]
 
-const STATUS_RANK = { null: 0, analysis_failed: 1, analyzing: 2, ready: 3, viva_in_progress: 4, scoring_failed: 5, scoring: 6, completed: 7 }
+const STATUS_RANK = { null: 0, off_topic: 1, analysis_failed: 1, analyzing: 2, ready: 3, viva_in_progress: 4, scoring_failed: 5, scoring: 6, completed: 7 }
 const DONE = ['scoring', 'scoring_failed', 'completed']
 
 function statusRank(a) {

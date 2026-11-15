@@ -1,63 +1,43 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { api, blobUrl } from '../lib/api'
+import { api } from '../lib/api'
+import { usePdfPages } from '../lib/pdfPages'
 import { toast } from '../lib/toast'
 import Icon from '../components/Icon.vue'
 
-GlobalWorkerOptions.workerSrc = workerUrl
-
 const props = defineProps({ id: String })
 const router = useRouter()
-const RENDER_WIDTH = 1400 // px; sharp enough for the single-page view, reused for thumbnails
 
 const sub = ref(null)
 const error = ref('')
 const pages = ref([]) // per question: selected PDF page numbers
 const order = ref([]) // PDF page numbers in the order the student arranged them
 const rotations = ref([]) // clockwise degrees, index = page - 1
-const images = ref([]) // object URL per rendered page, index = page - 1
+const { images, open, render: renderPage, renderAll } = usePdfPages() // images[page - 1] = object URL
 const active = ref(0) // question being assigned
 const viewing = ref(null) // PDF page number shown large, null = grid
 const dragFrom = ref(null) // index in order
 const dragOver = ref(null)
 const saving = ref(false)
-let pdf = null
-let pdfUrl = null
 
 const parts = computed(() => sub.value?.parts || [])
 const owners = (p) => pages.value.flatMap((list, i) => (list.includes(p) ? [i] : []))
 const missing = computed(() => pages.value.filter((l) => !l.length).length)
 const pos = computed(() => order.value.indexOf(viewing.value))
 
-async function render(n) {
-  const page = await pdf.getPage(n)
-  const rotation = (page.rotate + rotations.value[n - 1]) % 360
-  const base = page.getViewport({ scale: 1, rotation })
-  const viewport = page.getViewport({ scale: RENDER_WIDTH / base.width, rotation })
-  const canvas = document.createElement('canvas')
-  canvas.width = viewport.width
-  canvas.height = viewport.height
-  await page.render({ canvas, viewport }).promise
-  const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.85))
-  if (images.value[n - 1]) URL.revokeObjectURL(images.value[n - 1])
-  images.value[n - 1] = URL.createObjectURL(blob)
-}
+const render = (n) => renderPage(n, rotations.value[n - 1])
 
 async function load() {
   try {
     sub.value = await api(`/api/submissions/${props.id}`)
     if (!sub.value.page_map) return router.replace(`/assignments/${sub.value.assignment.id}`)
     pages.value = sub.value.page_map.map((l) => [...l])
-    pdfUrl = await blobUrl(`/api/submissions/${props.id}/pdf`)
-    pdf = await getDocument({ url: pdfUrl }).promise
-    const n = pdf.numPages
+    const n = await open(`/api/submissions/${props.id}/pdf`)
     const saved = sub.value.page_order
     order.value = saved?.length === n ? [...saved] : Array.from({ length: n }, (_, i) => i + 1)
     rotations.value = sub.value.page_rotation?.length === n ? [...sub.value.page_rotation] : Array(n).fill(0)
-    for (const p of order.value) await render(p)
+    await renderAll(order.value, (p) => rotations.value[p - 1])
   } catch (e) {
     error.value = e.message
   }
@@ -126,9 +106,6 @@ onMounted(() => {
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKey)
-  images.value.forEach((u) => u && URL.revokeObjectURL(u))
-  if (pdfUrl) URL.revokeObjectURL(pdfUrl)
-  pdf?.destroy()
 })
 </script>
 

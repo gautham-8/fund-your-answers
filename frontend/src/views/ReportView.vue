@@ -2,11 +2,10 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api, blobUrl } from '../lib/api'
 import { confirmDialog } from '../lib/confirm'
-import { fmtDate, initials, relative } from '../lib/format'
+import { fmtPts, initials, relative } from '../lib/format'
 import { setCourse } from '../lib/store'
 import { toast } from '../lib/toast'
 import Icon from '../components/Icon.vue'
-import ScoreRing from '../components/ScoreRing.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
 const props = defineProps({ id: String })
@@ -17,7 +16,11 @@ const audio = reactive({}) // turn id -> object URL
 const drafts = reactive({}) // dim index -> { score, note }
 const editing = ref(null)
 const saving = ref(null)
+const allowing = ref(false)
+const openDims = reactive(new Set()) // rubric rows showing their evidence
+const openTurns = reactive(new Set()) // viva questions showing the full exchange
 let timer = null
+const toggle = (set, k) => (set.has(k) ? set.delete(k) : set.add(k))
 
 async function load() {
   try {
@@ -32,6 +35,7 @@ async function load() {
   }
   sub.value.score?.dimensions.forEach((d, i) => {
     drafts[i] = { score: d.override_score ?? null, note: d.override_note || '' }
+    if (d.needs_review && d.override_score == null) openDims.add(i) // what needs a decision is open from the start
   })
   clearTimeout(timer)
   if (['analyzing', 'scoring'].includes(sub.value.status)) timer = setTimeout(load, 3000)
@@ -57,6 +61,27 @@ async function saveOverride(i) {
   }
 }
 
+async function allowThrough() {
+  const ok = await confirmDialog({
+    title: 'Let this submission through?',
+    message: "The AI thinks this PDF doesn't answer the assignment. If you let it through, viva questions are written from it and the student can start the viva.",
+    confirmText: 'Let it through',
+  })
+  if (!ok) return
+  allowing.value = true
+  try {
+    await api(`/api/submissions/${props.id}/allow`, { method: 'POST' })
+    await load()
+  } catch (e) {
+    toast(e.message, { type: 'error' })
+  } finally {
+    allowing.value = false
+  }
+}
+
+const vivaWeight = computed(() => sub.value?.assignment.viva_weight ?? 0.3)
+const pct = (x) => `${Math.round(x * 100)}%`
+
 async function rescore() {
   const ok = await confirmDialog({
     title: 'Re-run AI scoring?',
@@ -78,11 +103,23 @@ const openRegrades = computed(() => (sub.value?.regrade_requests || []).filter((
 const regradeFor = (i) => openRegrades.value.find((r) => r.dimension_index === i)
 const turnsFor = (i) => sub.value.turns.filter((t) => t.question_index === i)
 const QUALITY = {
-  strong: 'bg-emerald-50 text-emerald-700',
-  partial: 'bg-amber-50 text-amber-700',
-  weak: 'bg-rose-50 text-rose-700',
-  no_answer: 'bg-slate-100 text-slate-500',
+  strong: ['Strong', 'bg-emerald-50 text-emerald-700 ring-emerald-200'],
+  partial: ['Partial', 'bg-amber-50 text-amber-700 ring-amber-200'],
+  weak: ['Weak', 'bg-rose-50 text-rose-700 ring-rose-200'],
+  no_answer: ['No answer', 'bg-slate-100 text-slate-500 ring-slate-200'],
 }
+const finalOf = (d) => d.override_score ?? d.score
+const reviewCount = computed(() => (sub.value?.score?.dimensions || []).filter((d) => d.needs_review && d.override_score == null).length)
+/** Short list of things the instructor has to act on; empty means nothing needs attention. */
+const todo = computed(() => {
+  const s = sub.value
+  if (!s) return []
+  const out = []
+  if (s.status === 'completed' && s.grader_points == null) out.push(s.questions_graded ? `Finish grading the written solution (${s.questions_graded}/${s.parts.length} questions done)` : 'Grade the written solution')
+  if (reviewCount.value) out.push(`Check ${reviewCount.value} viva score${reviewCount.value === 1 ? '' : 's'} the AI wasn't sure about`)
+  if (openRegrades.value.length) out.push(`Answer ${openRegrades.value.length} regrade request${openRegrades.value.length === 1 ? '' : 's'}`)
+  return out
+})
 
 onMounted(load)
 onUnmounted(() => {
@@ -108,93 +145,117 @@ onUnmounted(() => {
     </nav>
 
     <!-- Header -->
-    <header class="card flex flex-wrap items-center gap-5">
-      <span class="grid size-14 shrink-0 place-items-center rounded-full bg-slate-900 text-lg font-semibold text-white">{{ initials(sub.student?.name) }}</span>
+    <header class="flex flex-wrap items-center gap-4">
+      <span class="grid size-12 shrink-0 place-items-center rounded-full bg-slate-900 font-semibold text-white">{{ initials(sub.student?.name) }}</span>
       <div class="min-w-0 flex-1">
         <h1 class="text-xl font-semibold tracking-tight">{{ sub.student?.name }}</h1>
-        <p class="truncate text-sm text-slate-500">{{ sub.student?.email }}</p>
-        <div class="mt-2 flex flex-wrap items-center gap-2">
-          <StatusBadge :status="sub.status" :needs-review="sub.needs_review" :late="sub.late" />
-          <span class="text-xs text-slate-400">Submitted {{ fmtDate(sub.created_at) }}</span>
+        <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+          <StatusBadge :status="sub.status" :late="sub.late" />
+          <span>Submitted {{ relative(sub.created_at) }}</span>
+          <span v-if="sub.grades_published" class="text-emerald-600">· Grades published</span>
         </div>
       </div>
-      <button class="btn-secondary" @click="openPdf()"><Icon name="file" />{{ sub.filename }}<Icon name="external" :size="13" class="text-slate-400" /></button>
-      <ScoreRing v-if="sub.score" :value="sub.overall" :size="88" label="Score" />
+      <button class="btn-secondary" @click="openPdf()"><Icon name="file" />PDF<Icon name="external" :size="13" class="text-slate-400" /></button>
+      <RouterLink :to="`/submissions/${id}/grade`" class="btn-primary"><Icon name="pencil" />{{ sub.grader_points != null ? 'Review grading' : 'Grade' }}</RouterLink>
     </header>
 
-    <div v-if="sub.error" class="error-box mt-4">Error: {{ sub.error }}</div>
-    <div v-if="sub.analysis?.embedded_instructions_detected" class="mt-4 flex items-start gap-2.5 rounded-xl border border-orange-200 bg-orange-50 p-3.5 text-sm text-orange-900">
-      <Icon name="alert" class="mt-0.5 text-orange-500" />
-      The PDF contains text that appears to address an AI or grader. It was ignored during analysis and scoring.
+    <!-- Blocking problems -->
+    <div v-if="sub.status === 'off_topic'" class="mt-5 flex flex-wrap items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
+      <Icon name="alert" class="mt-0.5 text-rose-500" />
+      <div class="min-w-0 flex-1">
+        <p class="font-medium">This PDF doesn't seem to answer the assignment, so no viva was opened.</p>
+        <p v-if="sub.analysis?.relevance_note" class="mt-1">{{ sub.analysis.relevance_note }}</p>
+      </div>
+      <button class="btn-secondary btn-sm" :disabled="allowing" @click="allowThrough">Let it through anyway</button>
     </div>
-    <div v-if="openRegrades.length" class="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-orange-200 bg-orange-50 p-3.5 text-sm text-orange-900">
-      <Icon name="regrade" class="text-orange-500" />
-      <span class="flex-1">{{ openRegrades.length }} open regrade request{{ openRegrades.length === 1 ? '' : 's' }} on this submission.</span>
-      <RouterLink :to="`/courses/${sub.course.id}/regrades`" class="font-medium underline-offset-2 hover:underline">Respond</RouterLink>
-    </div>
+    <div v-if="sub.error" class="error-box mt-5">Error: {{ sub.error }}</div>
 
-    <!-- Scores -->
-    <section v-if="sub.score" class="mt-8">
-      <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 class="text-lg font-semibold tracking-tight">Rubric scores</h2>
-        <div class="flex items-center gap-2">
-          <span class="text-xs" :class="sub.grades_published ? 'text-emerald-600' : 'text-slate-400'">
-            {{ sub.grades_published ? 'Visible to student' : 'Hidden from student until published' }}
-          </span>
-          <button class="btn-ghost btn-sm" @click="rescore"><Icon name="regrade" :size="13" />Re-run scoring</button>
+    <!-- At a glance -->
+    <section class="card mt-5 space-y-4">
+      <div class="grid grid-cols-3 divide-x divide-slate-100 text-center">
+        <div class="px-2">
+          <div class="text-xs text-slate-500">Written solution</div>
+          <div class="mt-1 text-2xl font-semibold tracking-tight">
+            <template v-if="sub.grader_points != null">{{ fmtPts(sub.grader_points) }}<span class="text-sm font-normal text-slate-400"> / {{ fmtPts(sub.assignment.max_points) }}</span></template>
+            <span v-else class="text-slate-300">—</span>
+          </div>
+          <div class="text-[11px] text-slate-400">{{ pct(1 - vivaWeight) }} of grade</div>
+        </div>
+        <div class="px-2">
+          <div class="text-xs text-slate-500">Viva</div>
+          <div class="mt-1 text-2xl font-semibold tracking-tight">
+            <template v-if="sub.score">{{ Math.round(sub.overall) }}%</template>
+            <span v-else class="text-slate-300">—</span>
+          </div>
+          <div class="text-[11px] text-slate-400">{{ pct(vivaWeight) }} of grade</div>
+        </div>
+        <div class="px-2">
+          <div class="text-xs text-slate-500">Final grade</div>
+          <div class="mt-1 text-2xl font-semibold tracking-tight" :class="sub.final != null && 'text-indigo-700'">
+            <template v-if="sub.final != null">{{ sub.final }}%</template>
+            <span v-else class="text-slate-300">—</span>
+          </div>
+          <div class="text-[11px] text-slate-400">{{ sub.final != null ? 'combined' : 'after grading' }}</div>
         </div>
       </div>
-      <p class="mb-4 leading-relaxed text-slate-700">{{ sub.score.summary }}</p>
 
-      <div class="space-y-3">
-        <div
-          v-for="(d, i) in sub.score.dimensions"
-          :key="d.dimension"
-          class="card"
-          :class="{ 'border-orange-300 ring-4 ring-orange-50': d.needs_review && d.override_score == null }"
-        >
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-2">
-                <h3 class="font-semibold">{{ d.dimension }}</h3>
-                <span v-if="d.needs_review && d.override_score == null" class="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-800">Needs review</span>
-                <span v-if="regradeFor(i)" class="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-xs font-medium text-orange-700 ring-1 ring-orange-200 ring-inset">
-                  <Icon name="regrade" :size="11" />Regrade requested
-                </span>
-              </div>
-              <div class="mt-1 flex items-center gap-2 text-xs text-slate-500">
-                <span class="inline-flex items-center gap-1.5">
-                  AI confidence
-                  <span class="inline-block h-1 w-12 overflow-hidden rounded-full bg-slate-100">
-                    <span class="block h-full rounded-full" :class="d.confidence >= 0.6 ? 'bg-emerald-500' : 'bg-orange-500'" :style="{ width: d.confidence * 100 + '%' }"></span>
-                  </span>
-                  {{ Math.round(d.confidence * 100) }}%
-                </span>
-                <span v-if="!d.quote_verified" class="text-orange-600">· quote not found verbatim in transcript</span>
-              </div>
+      <p v-if="sub.score?.summary" class="border-t border-slate-100 pt-4 text-sm leading-relaxed text-slate-600">{{ sub.score.summary }}</p>
+      <div v-else-if="sub.status === 'scoring'" class="flex items-center gap-2 border-t border-slate-100 pt-4 text-sm text-slate-500">
+        <span class="size-4 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600"></span>Scoring the viva…
+      </div>
+
+      <ul v-if="todo.length" class="space-y-1.5 border-t border-slate-100 pt-4">
+        <li v-for="t in todo" :key="t" class="flex items-center gap-2 text-sm text-orange-800">
+          <span class="size-1.5 shrink-0 rounded-full bg-orange-500"></span>{{ t }}
+          <RouterLink v-if="t.startsWith('Answer')" :to="`/courses/${sub.course.id}/regrades`" class="text-xs font-medium text-orange-700 underline-offset-2 hover:underline">Open</RouterLink>
+        </li>
+      </ul>
+      <p v-else-if="sub.status === 'completed'" class="flex items-center gap-2 border-t border-slate-100 pt-4 text-sm text-emerald-700">
+        <Icon name="check-circle" :size="15" />Nothing left to do here.
+      </p>
+      <p v-if="sub.analysis?.embedded_instructions_detected" class="text-xs text-orange-700">
+        <Icon name="alert" :size="12" class="mr-1 inline" />The PDF contains text aimed at an AI or grader. It was ignored.
+      </p>
+    </section>
+
+    <!-- Viva scores: one line each, details on demand -->
+    <section v-if="sub.score" class="mt-8">
+      <div class="mb-2 flex items-baseline justify-between gap-2">
+        <h2 class="font-semibold">Viva scores</h2>
+        <button class="btn-ghost btn-sm text-slate-500" @click="rescore"><Icon name="regrade" :size="13" />Re-run scoring</button>
+      </div>
+      <div class="card divide-y divide-slate-100 p-0">
+        <div v-for="(d, i) in sub.score.dimensions" :key="d.dimension">
+          <button type="button" class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-50/70" :aria-expanded="openDims.has(i)" @click="toggle(openDims, i)">
+            <Icon name="chevron-right" :size="14" class="shrink-0 text-slate-400 transition" :class="openDims.has(i) && 'rotate-90'" />
+            <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ d.dimension }}</span>
+            <span v-if="d.needs_review && d.override_score == null" class="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-medium text-orange-800">Check</span>
+            <span v-if="regradeFor(i)" class="rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-medium text-orange-700 ring-1 ring-orange-200 ring-inset">Regrade</span>
+            <span v-if="d.override_score != null" class="text-[11px] text-slate-400">edited</span>
+            <span class="hidden gap-0.5 sm:flex" aria-hidden="true">
+              <span v-for="n in 5" :key="n" class="h-1.5 w-4 rounded-full" :class="n <= finalOf(d) ? 'bg-indigo-500' : 'bg-slate-200'"></span>
+            </span>
+            <span class="w-9 text-right font-mono text-sm font-semibold">{{ finalOf(d) }}<span class="font-normal text-slate-400">/5</span></span>
+          </button>
+
+          <div v-if="openDims.has(i)" class="space-y-3 px-4 pb-4 pl-11 text-sm">
+            <blockquote v-if="d.evidence_quote" class="border-l-2 border-indigo-200 pl-3 text-slate-700 italic">“{{ d.evidence_quote }}”</blockquote>
+            <p class="text-slate-600">{{ d.rationale }}</p>
+            <p v-if="d.needs_review && d.override_score == null" class="text-xs text-orange-700">
+              Why flagged:
+              <template v-if="!d.quote_verified">the quote isn't word-for-word in the transcript</template>
+              <template v-if="!d.quote_verified && d.confidence < 0.6"> and </template>
+              <template v-if="d.confidence < 0.6">the AI was only {{ Math.round(d.confidence * 100) }}% confident</template>.
+            </p>
+            <div v-if="regradeFor(i)" class="rounded-lg bg-orange-50/70 p-3">
+              <div class="mb-0.5 text-xs font-medium text-orange-700">Student's regrade request · {{ relative(regradeFor(i).created_at) }}</div>
+              <p class="whitespace-pre-line text-slate-700">{{ regradeFor(i).message }}</p>
             </div>
-            <div class="text-right">
-              <div class="font-mono text-2xl font-semibold">
-                <template v-if="d.override_score != null">
-                  {{ d.override_score }}<span class="text-base text-slate-400">/5</span>
-                  <span class="ml-1 text-sm font-normal text-slate-400 line-through">{{ d.score }}</span>
-                </template>
-                <template v-else>{{ d.score }}<span class="text-base text-slate-400">/5</span></template>
-              </div>
-              <div v-if="d.override_score != null" class="text-xs text-slate-500">set by {{ d.overridden_by }}</div>
-            </div>
-          </div>
+            <p v-if="d.override_score != null" class="text-xs text-slate-500">
+              AI gave {{ d.score }}/5; changed by {{ d.overridden_by }}<template v-if="d.override_note">: “{{ d.override_note }}”</template>
+            </p>
 
-          <blockquote v-if="d.evidence_quote" class="mt-3 border-l-2 border-indigo-200 pl-3 text-sm text-slate-700 italic">“{{ d.evidence_quote }}”</blockquote>
-          <p class="mt-2 text-sm text-slate-600">{{ d.rationale }}</p>
-          <div v-if="regradeFor(i)" class="mt-3 rounded-lg bg-orange-50/70 p-3 text-sm">
-            <div class="mb-0.5 text-xs font-medium text-orange-700">Student’s regrade request · {{ relative(regradeFor(i).created_at) }}</div>
-            <p class="whitespace-pre-line text-slate-700">{{ regradeFor(i).message }}</p>
-          </div>
-          <p v-if="d.override_note && editing !== i" class="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600"><b>Note:</b> {{ d.override_note }}</p>
-
-          <div class="mt-3">
-            <button v-if="editing !== i" class="btn-ghost btn-sm -ml-2" @click="editing = i"><Icon name="pencil" :size="13" />Override score</button>
+            <button v-if="editing !== i" class="btn-ghost btn-sm -ml-2" @click="editing = i"><Icon name="pencil" :size="13" />Change score</button>
             <div v-else-if="drafts[i]" class="space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3.5">
               <div class="flex flex-wrap items-center gap-1.5">
                 <button
@@ -202,21 +263,17 @@ onUnmounted(() => {
                   class="h-9 rounded-lg px-3 text-xs font-medium ring-1 transition ring-inset"
                   :class="drafts[i].score == null ? 'bg-slate-900 text-white ring-slate-900' : 'bg-white text-slate-600 ring-slate-200 hover:ring-slate-300'"
                   @click="drafts[i].score = null"
-                >
-                  AI ({{ d.score }})
-                </button>
+                >AI ({{ d.score }})</button>
                 <button
-                  v-for="n in 5"
+                  v-for="n in [0, 1, 2, 3, 4, 5]"
                   :key="n"
                   type="button"
                   class="size-9 rounded-lg text-sm font-semibold ring-1 transition ring-inset"
                   :class="drafts[i].score === n ? 'bg-indigo-600 text-white ring-indigo-600' : 'bg-white text-slate-700 ring-slate-200 hover:ring-indigo-300'"
                   @click="drafts[i].score = n"
-                >
-                  {{ n }}
-                </button>
+                >{{ n }}</button>
               </div>
-              <input v-model="drafts[i].note" class="input" placeholder="Note (optional — shown to the student when grades are published)" />
+              <input v-model="drafts[i].note" class="input" placeholder="Note for the student (optional)" />
               <div class="flex justify-end gap-2">
                 <button class="btn-secondary btn-sm" @click="editing = null">Cancel</button>
                 <button class="btn-primary btn-sm" :disabled="saving === i" @click="saveOverride(i)">Save</button>
@@ -226,102 +283,72 @@ onUnmounted(() => {
         </div>
       </div>
     </section>
-    <div v-else-if="sub.status === 'scoring'" class="card mt-8 flex items-center gap-3 text-slate-600">
-      <span class="size-4 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600"></span>Scoring in progress…
-    </div>
 
-    <!-- Transcript -->
-    <section v-if="sub.page_map" class="mt-10">
-      <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <h2 class="text-lg font-semibold tracking-tight">Answer pages</h2>
-        <p class="text-xs text-slate-500">
-          {{ sub.pages_confirmed_at ? `Confirmed by the student ${fmtDate(sub.pages_confirmed_at)}` : 'AI match, not yet confirmed by the student' }}
-        </p>
-      </div>
-      <div class="card divide-y divide-slate-100 p-0 text-sm">
-        <div v-for="(q, i) in sub.parts" :key="i" class="flex flex-wrap items-baseline gap-2 px-4 py-3">
-          <span class="font-medium">Q{{ i + 1 }}.</span>
-          <span class="min-w-0 flex-1 text-slate-700">{{ q }}</span>
-          <span class="flex flex-wrap gap-1">
-            <button
-              v-for="p in sub.page_map[i]"
-              :key="p"
-              class="rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
-              @click="openPdf(p)"
-            >
-              p. {{ p }}
-            </button>
-            <span v-if="!sub.page_map[i]?.length" class="text-xs text-orange-600">No pages</span>
-          </span>
-        </div>
-      </div>
-    </section>
+    <!-- Viva conversation: one line per question, full exchange on demand -->
+    <section v-if="sub.questions.length" class="mt-8">
+      <h2 class="mb-2 font-semibold">Viva conversation</h2>
+      <div class="card divide-y divide-slate-100 p-0">
+        <div v-for="(q, i) in sub.questions" :key="i">
+          <button type="button" class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-50/70" :aria-expanded="openTurns.has(i)" @click="toggle(openTurns, i)">
+            <Icon name="chevron-right" :size="14" class="shrink-0 text-slate-400 transition" :class="openTurns.has(i) && 'rotate-90'" />
+            <span class="w-7 shrink-0 text-sm font-semibold text-slate-500">Q{{ i + 1 }}</span>
+            <span class="min-w-0 flex-1 truncate text-sm">{{ q.target || q.question }}</span>
+            <span v-if="!turnsFor(i).length" class="text-xs text-slate-400">Not answered</span>
+            <span class="flex items-center gap-1">
+              <template v-for="(t, k) in turnsFor(i)" :key="t.id">
+                <Icon v-if="k > 0" name="arrow-right" :size="11" class="text-slate-300" />
+                <span v-if="t.quality" class="rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset" :class="QUALITY[t.quality]?.[1]">{{ QUALITY[t.quality]?.[0] || t.quality }}</span>
+              </template>
+            </span>
+          </button>
 
-    <section v-if="sub.questions.length" class="mt-10">
-      <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-        <h2 class="text-lg font-semibold tracking-tight">Viva transcript</h2>
-        <p v-if="sub.consent_at" class="text-xs text-slate-500">Recording consent given {{ fmtDate(sub.consent_at) }}</p>
-      </div>
-      <div class="space-y-4">
-        <div v-for="(q, i) in sub.questions" :key="i" class="card space-y-4">
-          <div class="flex items-center gap-2 text-xs text-slate-500">
-            <span class="rounded-md bg-slate-900 px-1.5 py-0.5 font-semibold text-white">Q{{ i + 1 }}</span>
-            about “{{ q.target }}” · page {{ q.page }}
-          </div>
-          <template v-if="!turnsFor(i).length">
-            <p class="font-medium">{{ q.question }}</p>
-            <p class="text-sm text-slate-400">Not answered yet.</p>
-          </template>
-          <div v-for="t in turnsFor(i)" :key="t.id" class="space-y-2">
-            <div class="flex gap-2.5">
-              <span class="grid size-7 shrink-0 place-items-center rounded-full bg-indigo-100 text-indigo-600"><Icon name="sparkles" :size="13" /></span>
-              <p class="rounded-2xl rounded-tl-sm bg-slate-100 px-3.5 py-2 text-sm font-medium text-slate-800">
-                <span v-if="t.kind === 'followup'" class="text-indigo-600">Follow-up · </span>{{ t.question }}
-              </p>
-            </div>
-            <div class="flex justify-end gap-2.5">
-              <div class="max-w-[85%] space-y-1.5">
-                <p class="rounded-2xl rounded-tr-sm bg-indigo-600 px-3.5 py-2 text-sm whitespace-pre-line text-white">{{ t.transcript || '(no speech detected)' }}</p>
-                <div class="flex flex-wrap items-center justify-end gap-2 text-xs text-slate-500">
-                  <span class="inline-flex items-center gap-1"><Icon :name="t.answer_mode === 'typed' ? 'keyboard' : 'mic'" :size="12" />{{ t.answer_mode === 'typed' ? 'Typed' : 'Voice' }}</span>
-                  <span v-if="t.quality" class="rounded-full px-2 py-0.5 font-medium capitalize" :class="QUALITY[t.quality]">{{ t.quality.replace('_', ' ') }}</span>
-                  <span v-if="t.notes" class="text-slate-400">{{ t.notes }}</span>
-                </div>
-                <audio v-if="audio[t.id]" :src="audio[t.id]" controls class="ml-auto h-8 w-full max-w-xs"></audio>
+          <div v-if="openTurns.has(i)" class="space-y-4 px-4 pb-4 pl-11">
+            <div v-for="t in turnsFor(i)" :key="t.id" class="space-y-1.5 text-sm">
+              <p class="font-medium text-slate-800"><span v-if="t.kind === 'followup'" class="text-indigo-600">Follow-up: </span>{{ t.question }}</p>
+              <p class="rounded-xl bg-slate-50 px-3 py-2 whitespace-pre-line text-slate-700">{{ t.transcript || '(no speech detected)' }}</p>
+              <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span class="inline-flex items-center gap-1"><Icon :name="t.answer_mode === 'typed' ? 'keyboard' : 'mic'" :size="12" />{{ t.answer_mode === 'typed' ? 'Typed' : 'Spoken' }}</span>
+                <span v-if="t.notes">· {{ t.notes }}</span>
               </div>
-              <span class="grid size-7 shrink-0 place-items-center rounded-full bg-slate-900 text-[10px] font-semibold text-white">{{ initials(sub.student?.name) }}</span>
+              <audio v-if="audio[t.id]" :src="audio[t.id]" controls class="h-8 w-full max-w-xs"></audio>
             </div>
+            <p v-if="!turnsFor(i).length" class="text-sm text-slate-600">{{ q.question }}</p>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Analysis -->
-    <section v-if="sub.analysis" class="mt-10">
-      <h2 class="mb-1 text-lg font-semibold tracking-tight">PDF analysis</h2>
-      <p class="mb-4 leading-relaxed text-slate-600">{{ sub.analysis.summary }}</p>
-      <div class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-xs">
-        <table class="w-full text-sm">
-          <thead class="border-b border-slate-100 bg-slate-50/60">
-            <tr>
-              <th class="th">Type</th>
-              <th class="th">Method / decision</th>
-              <th class="th text-right">Page</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-100">
-            <tr v-for="(it, i) in sub.analysis.items" :key="i" class="align-top">
-              <td class="td"><span class="rounded-md bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-600 capitalize">{{ it.kind }}</span></td>
-              <td class="td">
-                <div class="font-medium">{{ it.name }}</div>
-                <div class="text-slate-600">{{ it.description }}</div>
-                <div v-if="it.excerpt" class="mt-1 text-xs text-slate-500 italic">“{{ it.excerpt }}”</div>
-              </td>
-              <td class="td text-right font-mono text-slate-500">{{ it.page }}</td>
-            </tr>
-          </tbody>
-        </table>
+    <!-- Reference material, folded away -->
+    <details v-if="sub.page_map || sub.analysis" class="group card mt-8 p-0">
+      <summary class="flex cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
+        <Icon name="chevron-right" :size="14" class="text-slate-400 transition group-open:rotate-90" />
+        Submission details
+        <span class="font-normal text-slate-400">· answer pages and what the AI read in the PDF</span>
+      </summary>
+      <div class="space-y-6 border-t border-slate-100 px-4 py-4 pl-11 text-sm">
+        <div v-if="sub.page_map">
+          <h3 class="mb-2 text-xs font-medium tracking-wide text-slate-500 uppercase">
+            Answer pages <span class="font-normal normal-case">· {{ sub.pages_confirmed_at ? 'confirmed by the student' : 'AI guess, not confirmed yet' }}</span>
+          </h3>
+          <div class="flex flex-wrap gap-1.5">
+            <span v-for="(q, i) in sub.parts" :key="i" class="inline-flex items-center gap-1 rounded-lg bg-slate-50 px-2 py-1 text-xs ring-1 ring-slate-200 ring-inset" :title="q">
+              <b>Q{{ i + 1 }}</b>
+              <template v-if="sub.page_map[i]?.length">p. {{ sub.page_map[i].join(', ') }}</template>
+              <span v-else class="text-orange-600">none</span>
+            </span>
+          </div>
+        </div>
+        <div v-if="sub.analysis">
+          <h3 class="mb-2 text-xs font-medium tracking-wide text-slate-500 uppercase">What the AI found in the PDF</h3>
+          <p class="mb-2 text-slate-600">{{ sub.analysis.summary }}</p>
+          <ul class="space-y-1">
+            <li v-for="(it, i) in sub.analysis.items" :key="i" class="flex gap-2" :title="it.description">
+              <span class="w-8 shrink-0 font-mono text-xs text-slate-400">p. {{ it.page }}</span>
+              <span class="text-slate-700">{{ it.name }}</span>
+            </li>
+          </ul>
+        </div>
       </div>
-    </section>
+    </details>
   </div>
 </template>

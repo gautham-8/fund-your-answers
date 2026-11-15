@@ -43,7 +43,7 @@ async function resolve(r, status = 'resolved') {
   saving.value = true
   try {
     const body = { status, response: draft.response }
-    if (status === 'resolved' && draft.score) body.override_score = draft.score
+    if (status === 'resolved' && draft.score != null) body.override_score = draft.score
     const updated = await api(`/api/regrade-requests/${r.id}`, { method: 'PATCH', body })
     Object.assign(r, updated)
     expanded.value = null
@@ -150,7 +150,7 @@ onMounted(load)
             <span class="label">New score for {{ r.dimension }} <span class="font-normal text-slate-400">(optional — currently {{ r.score_before }}/5)</span></span>
             <div class="flex gap-1.5">
               <button
-                v-for="n in 5"
+                v-for="n in [0, 1, 2, 3, 4, 5]"
                 :key="n"
                 type="button"
                 class="size-9 rounded-lg text-sm font-semibold ring-1 transition ring-inset"

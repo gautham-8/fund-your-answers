@@ -94,7 +94,7 @@ onMounted(load)
         <input v-model="form.due_date" type="datetime-local" class="input sm:w-auto" />
       </div>
       <div>
-        <label class="label">Rubric (each dimension is scored 1–5)</label>
+        <label class="label">Rubric (each dimension is scored 0–5)</label>
         <div v-for="(r, i) in form.rubric" :key="i" class="mb-2 flex gap-2">
           <input v-model="r.name" class="input w-40 shrink-0" placeholder="Dimension" />
           <input v-model="r.description" class="input" placeholder="What it measures" />

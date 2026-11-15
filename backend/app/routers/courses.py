@@ -2,14 +2,14 @@ import secrets
 from collections import Counter, defaultdict
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
-from .. import db, pipeline, schedule
+from .. import db, gemini, pipeline, schedule, storage
 from ..access import load_assignment, load_course
 from ..auth import current_user, instructor, student
-from ..config import DEFAULT_RUBRIC
+from ..config import DEFAULT_RUBRIC, settings
 
 router = APIRouter(prefix="/api", tags=["courses"])
 
@@ -47,6 +47,9 @@ class AssignmentIn(BaseModel):
     late_due_date: datetime | None = None
     rubric: list[RubricItem] | None = None
     parts: list[str] = Field(default=[], max_length=30, description="The assignment's own questions, in order")
+    part_points: list[float] = Field(default=[], description="Points per question, same order as parts")
+    max_points: float = Field(default=100, gt=0, le=10000, description="Marked out of, when there are no questions")
+    viva_weight: float | None = Field(default=None, ge=0, le=1, description="Share of the final grade from the viva")
 
 
 class AssignmentPatch(BaseModel):
@@ -56,6 +59,14 @@ class AssignmentPatch(BaseModel):
     due_date: datetime | None = None
     late_due_date: datetime | None = None
     grades_published: bool | None = None
+    max_points: float | None = Field(default=None, gt=0, le=10000)
+    part_points: list[float] | None = None
+    viva_weight: float | None = Field(default=None, ge=0, le=1)
+
+
+def _check_points(points: list[float]) -> None:
+    if any(not (0 < p <= 10000) for p in points):
+        raise HTTPException(400, "Each question needs points between 0 and 10000")
 
 
 def _course_out(course: dict, user: dict, instructor_name: str | None = None) -> dict:
@@ -230,7 +241,9 @@ async def get_course(course_id: str, user: dict = Depends(current_user)):
     q = {"assignment_id": {"$in": asg_ids}}
     if not is_inst:
         q["student_id"] = user["_id"]
-    subs = await db.submissions.find(q, {"assignment_id": 1, "status": 1, "overall": 1, "needs_review": 1, "late": 1}).to_list(None)
+    subs = await db.submissions.find(
+        q, {"assignment_id": 1, "status": 1, "overall": 1, "grader_points": 1, "needs_review": 1, "late": 1}
+    ).to_list(None)
     subs_by_asg = defaultdict(list)
     for s in subs:
         subs_by_asg[s["assignment_id"]].append(s)
@@ -263,12 +276,14 @@ async def get_course(course_id: str, user: dict = Depends(current_user)):
             item["submitted_count"] = len(a_subs)
             item["completed_count"] = sum(s["status"] == pipeline.COMPLETED for s in a_subs)
             item["needs_review_count"] = sum(bool(s.get("needs_review")) for s in a_subs if s["status"] == pipeline.COMPLETED)
+            item["off_topic_count"] = sum(s["status"] == pipeline.OFF_TOPIC for s in a_subs)
+            item["ungraded_count"] = sum(s["status"] == pipeline.COMPLETED and s.get("grader_points") is None for s in a_subs)
         else:
             mine = a_subs[0] if a_subs else None
             item["my_status"] = mine["status"] if mine else None
             item["my_late"] = bool(mine and mine.get("late"))
             published = item["grades_published"] and mine and mine["status"] == pipeline.COMPLETED
-            item["my_score"] = mine.get("overall") if published else None
+            item["my_score"] = pipeline.final_grade(a, mine) if published else None
         out["assignments"].append(item)
 
     if is_inst:
@@ -290,6 +305,16 @@ async def create_assignment(course_id: str, body: AssignmentIn, user: dict = Dep
     course = await load_course(user, course_id)
     schedule.check_dates(body.release_date, body.due_date, body.late_due_date)
     rubric = [r.model_dump() for r in body.rubric] if body.rubric else DEFAULT_RUBRIC
+    if body.part_points and len(body.part_points) != len(body.parts):
+        raise HTTPException(400, "Give points for every question")
+    # Drop blank questions together with their points; without points, split max_points evenly.
+    kept = [
+        (q.strip()[:2000], body.part_points[i] if body.part_points else None)
+        for i, q in enumerate(body.parts) if q.strip()
+    ]
+    parts = [q for q, _ in kept]
+    part_points = [p if p is not None else body.max_points / len(kept) for _, p in kept]
+    _check_points(part_points)
     doc = {
         "course_id": course["_id"],
         "title": body.title.strip(),
@@ -299,7 +324,11 @@ async def create_assignment(course_id: str, body: AssignmentIn, user: dict = Dep
         "late_due_date": body.late_due_date,
         "grades_published": False,
         "rubric": rubric,
-        "parts": [q.strip()[:2000] for q in body.parts if q.strip()],
+        "parts": parts,
+        "part_points": part_points,
+        "max_points": sum(part_points) if parts else body.max_points,
+        "viva_weight": settings.default_viva_weight if body.viva_weight is None else body.viva_weight,
+        "brief_file_id": None,
         "created_at": db.now(),
     }
     res = await db.assignments.insert_one(doc)
@@ -311,7 +340,7 @@ async def create_assignment(course_id: str, body: AssignmentIn, user: dict = Dep
 async def update_assignment(assignment_id: str, body: AssignmentPatch, user: dict = Depends(instructor)):
     assignment, _ = await load_assignment(user, assignment_id)
     changes = body.model_dump(exclude_unset=True)
-    for key in ("title", "grades_published"):  # these can't be cleared
+    for key in ("title", "grades_published", "max_points", "viva_weight"):  # these can't be cleared
         if key in changes and changes[key] is None:
             del changes[key]
     if "title" in changes:
@@ -322,6 +351,58 @@ async def update_assignment(assignment_id: str, body: AssignmentPatch, user: dic
         changes["description"] = ""
     merged = {**assignment, **changes}
     schedule.check_dates(merged.get("release_date"), merged.get("due_date"), merged.get("late_due_date"))
+    if "part_points" in changes:  # questions are fixed after creation, but their points can change
+        if changes["part_points"] is None:
+            del changes["part_points"]
+        else:
+            if len(changes["part_points"]) != len(assignment.get("parts") or []):
+                raise HTTPException(400, "Give points for every question")
+            _check_points(changes["part_points"])
+            changes["max_points"] = sum(changes["part_points"])
+    merged = {**assignment, **changes}
     if changes:
         await db.assignments.update_one({"_id": assignment["_id"]}, {"$set": changes})
-    return db.serialize(merged)
+    out = db.serialize(merged)
+    out["part_points"] = pipeline.part_points(merged)
+    out["max_points"] = pipeline.max_points(merged)
+    return out
+
+
+@router.post("/assignments/brief/extract")
+async def extract_brief(file: UploadFile = File(...), user: dict = Depends(instructor)):
+    """Read an assignment handout PDF and draft its title, questions and viva rubric for the instructor to edit."""
+    data = await storage.read_pdf_upload(file)
+    try:
+        brief = await gemini.extract_brief(data)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Could not read the PDF, please try again ({str(e)[:200]})")
+    out = brief.model_dump()
+    kept = [p for p in out["parts"] if p["text"].strip()][:30]
+    out["parts"] = [p["text"].strip()[:2000] for p in kept]
+    out["part_points"] = [p["points"] if 0 < p["points"] <= 10000 else None for p in kept]  # None = not stated
+    out["rubric"] = [
+        {"name": r["name"].strip()[:60], "description": r["description"].strip()}
+        for r in out["rubric"] if r["name"].strip()
+    ][:8]
+    return out
+
+
+@router.put("/assignments/{assignment_id}/brief")
+async def upload_brief(assignment_id: str, file: UploadFile = File(...), user: dict = Depends(instructor)):
+    """Attach (or replace) the assignment handout. The AI reads it alongside each submission."""
+    assignment, _ = await load_assignment(user, assignment_id)
+    data = await storage.read_pdf_upload(file)
+    file_id = await storage.save(
+        data, file.filename or "assignment.pdf", "application/pdf", kind="assignment_brief", assignment_id=assignment["_id"]
+    )
+    await db.assignments.update_one(
+        {"_id": assignment["_id"]}, {"$set": {"brief_file_id": file_id, "brief_filename": file.filename or "assignment.pdf"}}
+    )
+    await storage.delete(assignment.get("brief_file_id"))
+    return {"brief_filename": file.filename or "assignment.pdf"}
+
+
+@router.get("/assignments/{assignment_id}/brief")
+async def get_brief(assignment_id: str, user: dict = Depends(current_user)):
+    assignment, _ = await load_assignment(user, assignment_id)
+    return await storage.file_response(assignment.get("brief_file_id"))

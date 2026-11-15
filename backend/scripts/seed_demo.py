@@ -64,6 +64,7 @@ STUDENTS = [
             ("We swap elements around the pivot inside the same array, so memory is just the recursion stack, log n on average. Mergesort needs an extra array of size n.", "strong", "Accurate comparison of memory use.", "", ""),
             ("If we needed a stable sort, like keeping readings with equal values in time order, mergesort is stable and quicksort isn't. Also mergesort has a guaranteed n log n worst case.", "strong", "Identifies stability and worst-case guarantees.", "", ""),
         ],
+        "grader_points": 92,  # the human grader's mark for the written solution (out of 100)
         "scores": [(5, "the first element would almost always be the smallest, so every partition would be lopsided", 0.9),
                    (4, "I tried 8, 16 and 32 and 16 was fastest on our machine", 0.85),
                    (5, "memory is just the recursion stack, log n on average", 0.9),
@@ -78,6 +79,7 @@ STUDENTS = [
             ("It moves smaller elements to the left and bigger to the right of the pivot, in the same array.", "partial", "Describes mechanism, does not address memory comparison.", "", ""),
             ("Mergesort is better when the data is random I think.", "weak", "Incorrect reasoning about when mergesort is preferable.", "", ""),
         ],
+        "grader_points": 74,  # the human grader's mark for the written solution (out of 100)
         "scores": [(2, "I think it would be slower, maybe because the pivot is bad", 0.7),
                    (2, "It's just better, the median of three is the standard way to do it", 0.75),
                    (2, "We read that 16 is a good number in a blog post", 0.7),
@@ -266,7 +268,11 @@ async def main() -> None:
             "submission_id": sub_id, "dimensions": dims, "summary": s["summary"],
             "overall": overall, "needs_review": needs_review, "created_at": now,
         })
-        await db.submissions.update_one({"_id": sub_id}, {"$set": {"overall": overall, "needs_review": needs_review}})
+        await db.submissions.update_one({"_id": sub_id}, {"$set": {
+            "overall": overall, "needs_review": needs_review,
+            # One completed student is left ungraded so the "Not graded" state shows up in the demo.
+            "grader_points": s.get("grader_points"), "graded_by": "Dr. Demo Instructor" if "grader_points" in s else None,
+        }})
 
     print(f"\nDemo data created in database '{db.db.name}' ({with_audio} spoken recordings).")
     print(f"  Instructor: instructor{DOMAIN}")

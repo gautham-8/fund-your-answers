@@ -1,12 +1,13 @@
 """File storage in MongoDB GridFS (PDFs and voice recordings live in Atlas alongside the data)."""
 
 from bson import ObjectId
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from fastapi.responses import Response
 from gridfs import AsyncGridFSBucket
 from gridfs.errors import NoFile
 
 from . import db
+from .config import settings
 
 # Stored as files.files / files.chunks collections in the app database.
 bucket = AsyncGridFSBucket(db.db, bucket_name="files")
@@ -47,3 +48,12 @@ async def file_response(file_id: ObjectId | None) -> Response:
         media_type=content_type,
         headers={"Content-Disposition": f'inline; filename="{filename}"', "Cache-Control": "private, max-age=3600"},
     )
+
+
+async def read_pdf_upload(file: UploadFile) -> bytes:
+    data = await file.read()
+    if len(data) > settings.max_pdf_mb * 1024 * 1024:
+        raise HTTPException(413, f"PDF must be under {settings.max_pdf_mb} MB")
+    if not data.startswith(b"%PDF"):
+        raise HTTPException(400, "Please upload a PDF file")
+    return data

@@ -48,8 +48,10 @@ watch(() => route.fullPath, () => (mobileOpen.value = false))
           <span class="font-semibold tracking-tight">Viva</span>
         </RouterLink>
       </header>
-      <main class="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
-        <RouterView />
+      <main :class="route.meta.wide ? 'w-full px-3 py-3 sm:px-4 lg:py-4' : 'mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10'">
+        <RouterView v-slot="{ Component, route: r }">
+          <component :is="Component" :key="r.meta.remount ? r.path : undefined" />
+        </RouterView>
       </main>
     </div>
   </div>

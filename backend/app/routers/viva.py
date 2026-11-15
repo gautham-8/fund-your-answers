@@ -20,6 +20,7 @@ async def _state(sub: dict) -> dict:
     return {
         "status": sub["status"],
         "error": sub.get("error"),
+        "relevance_note": (sub.get("analysis") or {}).get("relevance_note") if sub["status"] == pipeline.OFF_TOPIC else None,
         "consent_given": sub.get("consent_at") is not None,
         "pages_pending": pipeline.pages_pending(sub),
         "total_questions": len(sub.get("questions", [])),
@@ -28,11 +29,15 @@ async def _state(sub: dict) -> dict:
     }
 
 
-def _context_for(sub: dict, question_index: int, main_turn: dict | None) -> str:
+def _context_for(sub: dict, assignment: dict, question_index: int, main_turn: dict | None) -> str:
     analysis = sub.get("analysis") or {}
     q = sub["questions"][question_index]
     item = next((i for i in analysis.get("items", []) if i["name"] == q.get("target")), None)
     lines = [f"Submission summary: {analysis.get('summary', '')}"]
+    parts = assignment.get("parts") or []
+    part = q.get("part") or 0
+    if 1 <= part <= len(parts):
+        lines.append(f"Assignment question {part} that this is about: {parts[part - 1]}")
     if item:
         lines.append(f"The question is about: {item['name']} (page {item['page']}): {item['description']}")
         lines.append(f'Excerpt from their PDF: "{item["excerpt"]}"')
@@ -69,7 +74,7 @@ async def answer(
     audio: UploadFile | None = File(None),
     user: dict = Depends(student),
 ):
-    sub, _, _ = await load_submission(user, submission_id)
+    sub, assignment, _ = await load_submission(user, submission_id)
     if sub["status"] not in (pipeline.READY, pipeline.IN_PROGRESS):
         raise HTTPException(400, "The viva is not open")
     if sub.get("consent_at") is None:
@@ -95,7 +100,7 @@ async def answer(
     try:
         ev = await gemini.evaluate_answer(
             question=step["question"],
-            context=_context_for(sub, question_index, main_turn if kind == "followup" else None),
+            context=_context_for(sub, assignment, question_index, main_turn if kind == "followup" else None),
             is_followup=(kind == "followup"),
             audio_bytes=audio_bytes,
             audio_mime=audio_mime or "audio/wav",

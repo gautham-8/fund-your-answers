@@ -6,6 +6,7 @@ const props = defineProps({ status: String, needsReview: Boolean, late: Boolean 
 const MAP = {
   analyzing: ['Processing PDF', 'bg-amber-50 text-amber-700 ring-amber-200', 'bg-amber-500 animate-pulse'],
   analysis_failed: ['Analysis failed', 'bg-rose-50 text-rose-700 ring-rose-200', 'bg-rose-500'],
+  off_topic: ["Doesn't match assignment", 'bg-rose-50 text-rose-700 ring-rose-200', 'bg-rose-500'],
   ready: ['Viva ready', 'bg-sky-50 text-sky-700 ring-sky-200', 'bg-sky-500'],
   viva_in_progress: ['Viva in progress', 'bg-indigo-50 text-indigo-700 ring-indigo-200', 'bg-indigo-500 animate-pulse'],
   scoring: ['Scoring', 'bg-amber-50 text-amber-700 ring-amber-200', 'bg-amber-500 animate-pulse'],

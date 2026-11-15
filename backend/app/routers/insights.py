@@ -69,6 +69,8 @@ async def insights(assignment_id: str, user: dict = Depends(instructor)):
         "completed": len(subs),
         "needs_review": sum(1 for s in subs if s.get("needs_review")),
         "avg_overall": avg([s["overall"] for s in subs if s.get("overall") is not None]),
+        "graded": sum(1 for s in subs if s.get("grader_points") is not None),
+        "avg_final": avg([f for s in subs if (f := pipeline.final_grade(assignment, s)) is not None]),
         "rubric": rubric,
         "agreement": agreement,
         "concept_gaps": assignment.get("concept_gaps"),

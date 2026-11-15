@@ -160,3 +160,6 @@ export function scoreTone(pct) {
 }
 
 export const plural = (n, word, many = word + 's') => `${n} ${n === 1 ? word : many}`
+
+/** Points without trailing noise: 10, 7.5, 33.3 */
+export const fmtPts = (x) => (x == null || x === '' ? '—' : Number.isInteger(+x) ? String(+x) : (+x).toFixed(1).replace(/\.0$/, ''))

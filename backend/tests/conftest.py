@@ -43,17 +43,28 @@ class FakeGemini:
 
     def __init__(self):
         self.eval_calls = []
+        self.briefs = []
 
-    async def analyze_pdf(self, pdf, assignment):
+    async def extract_brief(self, pdf):
+        return gemini.AssignmentBrief(title="HW 2", description="Sort things.", parts=[
+            gemini.BriefPart(text="1.1 Implement quicksort", points=10), gemini.BriefPart(text="1.2 Analyse it", points=0),
+            gemini.BriefPart(text="  ", points=5)],
+                                      rubric=[gemini.RubricDraft(name="Pivot choice", description="Explains the pivot")])
+
+    async def analyze_pdf(self, pdf, assignment, brief=None):
+        self.briefs.append(brief)
+        # A PDF containing "unrelated" fails the relevance check.
+        on_topic = b"unrelated" not in pdf
         # Q1 on pages 1-2, Q2 not found, plus junk the server must drop (page 9 > page_count, part 7 doesn't exist)
         page_map = [gemini.PageMatch(part=1, pages=[2, 1, 9]), gemini.PageMatch(part=7, pages=[3])]
         return gemini.PdfAnalysis(summary="Uses quicksort.", embedded_instructions_detected=False, items=[
-            gemini.AnalysisItem(kind="method", name="Quicksort", description="sorts", page=2, excerpt="we use quicksort")],
+            gemini.AnalysisItem(kind="method", name="Quicksort", description="sorts", page=2, excerpt="we use quicksort", part=1)],
+            on_topic=on_topic, relevance_note="This is about cooking, not sorting." if not on_topic else "Answers the task.",
             page_count=3, page_map=page_map if assignment.get("parts") else [])
 
     async def generate_questions(self, analysis, assignment, n):
         return gemini.QuestionSet(questions=[
-            gemini.VivaQuestion(question=f"Q{i}?", target="Quicksort", page=2) for i in range(n)])
+            gemini.VivaQuestion(question=f"Q{i}?", target="Quicksort", page=2, part=1) for i in range(n)])
 
     async def evaluate_answer(self, **kw):
         self.eval_calls.append(kw)
@@ -80,7 +91,7 @@ class FakeGemini:
 @pytest.fixture(scope="session")
 def fake_gemini():
     fake = FakeGemini()
-    for name in ("analyze_pdf", "generate_questions", "evaluate_answer", "score_viva", "class_concept_gaps"):
+    for name in ("extract_brief", "analyze_pdf", "generate_questions", "evaluate_answer", "score_viva", "class_concept_gaps"):
         setattr(gemini, name, getattr(fake, name))
     return fake
 

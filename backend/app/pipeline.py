@@ -1,4 +1,4 @@
-"""Background work: PDF analysis -> questions, and final scoring. Plus viva progress logic."""
+"""Background work: PDF analysis -> relevance check -> questions, and viva scoring. Plus viva progress and grade logic."""
 
 import io
 import logging
@@ -15,6 +15,7 @@ log = logging.getLogger("viva.pipeline")
 # Submission statuses
 ANALYZING = "analyzing"
 ANALYSIS_FAILED = "analysis_failed"
+OFF_TOPIC = "off_topic"  # PDF doesn't answer the assignment; no viva until re-upload or instructor override
 READY = "ready"  # questions generated, viva not started
 IN_PROGRESS = "viva_in_progress"
 SCORING = "scoring"
@@ -23,28 +24,54 @@ COMPLETED = "completed"
 
 
 async def run_analysis(submission_id: ObjectId) -> None:
+    """Analyse the PDF, check it actually answers the assignment, and only then write viva questions."""
     sub = await db.submissions.find_one({"_id": submission_id})
     assignment = await db.assignments.find_one({"_id": sub["assignment_id"]})
     try:
         pdf_bytes, _, _ = await storage.read(sub["pdf_file_id"])
-        analysis = await gemini.analyze_pdf(pdf_bytes, assignment)
+        brief_bytes = None
+        if assignment.get("brief_file_id"):
+            brief_bytes, _, _ = await storage.read(assignment["brief_file_id"])
+        analysis = await gemini.analyze_pdf(pdf_bytes, assignment, brief_bytes)
         analysis_dict = analysis.model_dump(exclude={"page_map"})
-        qs = await gemini.generate_questions(analysis_dict, assignment, settings.num_questions)
+        parts = assignment.get("parts") or []
+        page_count = count_pages(pdf_bytes) or analysis.page_count
+        page_map = match_pages(analysis, len(parts), page_count) if parts else None
+        update = {
+            "analysis": analysis_dict, "page_map": page_map, "page_count": page_count,
+            "page_order": None, "page_rotation": None, "pages_confirmed_at": None,
+            "relevance_override_by": None, "error": None,
+        }
+        # No questions for a PDF that doesn't answer the assignment: the student re-uploads, or the instructor lets it through.
+        off_topic = not analysis.on_topic or (page_map is not None and not any(page_map))
+        if off_topic:
+            await db.submissions.update_one(
+                {"_id": submission_id}, {"$set": {**update, "questions": [], "status": OFF_TOPIC}}
+            )
+            return
+        await db.submissions.update_one({"_id": submission_id}, {"$set": update})
+        await run_questions(submission_id)
+    except Exception as e:  # noqa: BLE001 - surface any failure to the UI
+        log.exception("Analysis failed for %s", submission_id)
+        await db.submissions.update_one(
+            {"_id": submission_id}, {"$set": {"status": ANALYSIS_FAILED, "error": str(e)[:500]}}
+        )
+
+
+async def run_questions(submission_id: ObjectId) -> None:
+    """Write the viva questions from a stored analysis and open the viva."""
+    sub = await db.submissions.find_one({"_id": submission_id})
+    assignment = await db.assignments.find_one({"_id": sub["assignment_id"]})
+    try:
+        qs = await gemini.generate_questions(sub.get("analysis") or {}, assignment, settings.num_questions)
         questions = [q.model_dump() for q in qs.questions[: settings.num_questions]]
         if not questions:
             raise RuntimeError("No questions generated")
-        page_count = count_pages(pdf_bytes) or analysis.page_count
-        parts = assignment.get("parts") or []
-        page_map = match_pages(analysis, len(parts), page_count) if parts else None
         await db.submissions.update_one(
-            {"_id": submission_id},
-            {"$set": {
-                "analysis": analysis_dict, "questions": questions, "page_map": page_map,
-                "page_count": page_count, "page_order": None, "page_rotation": None, "pages_confirmed_at": None, "status": READY, "error": None,
-            }},
+            {"_id": submission_id}, {"$set": {"questions": questions, "status": READY, "error": None}}
         )
-    except Exception as e:  # noqa: BLE001 - surface any failure to the UI
-        log.exception("Analysis failed for %s", submission_id)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Question generation failed for %s", submission_id)
         await db.submissions.update_one(
             {"_id": submission_id}, {"$set": {"status": ANALYSIS_FAILED, "error": str(e)[:500]}}
         )
@@ -97,11 +124,60 @@ def quote_found(quote: str, transcripts: str) -> bool:
     return bool(q) and q in _normalize(transcripts)
 
 
+SCORE_MAX = 5  # rubric dimensions are scored 0-5; 0 = no understanding shown
+
+
 def overall_score(dimensions: list[dict]) -> float:
+    """Viva score as a percentage."""
     vals = [d["override_score"] if d.get("override_score") is not None else d["score"] for d in dimensions]
     if not vals:
         return 0.0
-    return round(sum(vals) / (5 * len(vals)) * 100, 1)
+    return round(sum(vals) / (SCORE_MAX * len(vals)) * 100, 1)
+
+
+def viva_weight(assignment: dict) -> float:
+    w = assignment.get("viva_weight")
+    return settings.default_viva_weight if w is None else w
+
+
+def part_points(assignment: dict) -> list[float]:
+    """Points per assignment question. Older assignments without them split max_points evenly."""
+    parts = assignment.get("parts") or []
+    pts = assignment.get("part_points") or []
+    if len(pts) == len(parts):
+        return list(pts)
+    return [(assignment.get("max_points") or 100) / len(parts)] * len(parts) if parts else []
+
+
+def max_points(assignment: dict) -> float:
+    """What the written solution is marked out of: the sum of the question points when there are questions."""
+    pts = part_points(assignment)
+    return sum(pts) if pts else (assignment.get("max_points") or 100)
+
+
+def question_grades(assignment: dict, sub: dict) -> list[dict]:
+    """The grader's mark and comment per assignment question (points None = not graded yet)."""
+    saved = sub.get("question_grades") or []
+    return [
+        {"points": saved[i].get("points"), "comment": saved[i].get("comment", "")} if i < len(saved) else {"points": None, "comment": ""}
+        for i in range(len(assignment.get("parts") or []))
+    ]
+
+
+def grader_percent(assignment: dict, sub: dict) -> float | None:
+    pts = sub.get("grader_points")
+    if pts is None:
+        return None
+    return round(min(1.0, pts / max_points(assignment)) * 100, 1)
+
+
+def final_grade(assignment: dict, sub: dict) -> float | None:
+    """Final % = (1 - w) x grader's % + w x viva %. None until both the viva is scored and a grader has marked it."""
+    g, v = grader_percent(assignment, sub), sub.get("overall")
+    if g is None or v is None or sub.get("status") != COMPLETED:
+        return None
+    w = viva_weight(assignment)
+    return round((1 - w) * g + w * v, 1)
 
 
 async def run_scoring(submission_id: ObjectId) -> None:
@@ -119,12 +195,12 @@ async def run_scoring(submission_id: ObjectId) -> None:
             d = by_name.get(r["name"].strip().lower())
             if d is None:
                 dims.append({
-                    "dimension": r["name"], "score": 1, "evidence_quote": "", "rationale": "Not scored by the model.",
+                    "dimension": r["name"], "score": 0, "evidence_quote": "", "rationale": "Not scored by the model.",
                     "confidence": 0.0, "quote_verified": False, "needs_review": True,
                     "override_score": None, "override_note": "",
                 })
                 continue
-            score = max(1, min(5, int(d.score)))
+            score = max(0, min(SCORE_MAX, int(d.score)))
             conf = max(0.0, min(1.0, float(d.confidence)))
             verified = quote_found(d.evidence_quote, all_text)
             dims.append({

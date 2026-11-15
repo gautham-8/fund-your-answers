@@ -18,6 +18,9 @@ def make_class(client, n_students=1):
 
 def run_viva(client, asg, S, voice_first=True):
     sid = ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4 fake")}, headers=S))["id"]
+    mine = ok(client.get(f"/api/submissions/{sid}", headers=S))
+    if mine["pages_pending"]:  # accept the AI's page matches as they are
+        ok(client.put(f"/api/submissions/{sid}/pages", json={"pages": mine["page_map"]}, headers=S))
     ok(client.post(f"/api/submissions/{sid}/viva/consent", headers=S))
     st = ok(client.get(f"/api/submissions/{sid}/viva", headers=S))
     while st["current"]:
@@ -266,8 +269,24 @@ def test_publish_grades_and_regrade_requests(client):
 
     ok(client.patch(f"/api/assignments/{asg['id']}", json={"grades_published": True}, headers=I))
     res = ok(client.get(f"/api/assignments/{asg['id']}", headers=S))["my_results"]
-    assert res["overall"] == 80.0 and res["dimensions"][0]["score"] == 4 and "confidence" not in res["dimensions"][0]
-    assert ok(client.get(f"/api/courses/{course['id']}", headers=S))["assignments"][0]["my_score"] == 80.0
+    # Published but not yet marked by a grader: viva only, no final grade
+    assert res["overall"] is None and res["viva"] == 80.0 and res["viva_weight"] == 0.3 and res["max_points"] == 100
+    assert res["dimensions"][0]["score"] == 4 and res["dimensions"][0]["max"] == 5 and "confidence" not in res["dimensions"][0]
+    assert ok(client.get(f"/api/courses/{course['id']}", headers=S))["assignments"][0]["my_score"] is None
+
+    # Final = 70% x grader + 30% x viva. 90 x 0.7 + 80 x 0.3 = 87
+    assert client.put(f"/api/submissions/{sid}/grade", json={"points": 101}, headers=I).status_code == 400
+    assert client.put(f"/api/submissions/{sid}/grade", json={"points": 90}, headers=S).status_code == 403
+    g = ok(client.put(f"/api/submissions/{sid}/grade", json={"points": 90, "note": "Good proof"}, headers=I))
+    assert g["final"] == 87.0 and g["graded_by"] == "Prof"
+    res = ok(client.get(f"/api/assignments/{asg['id']}", headers=S))["my_results"]
+    assert res["overall"] == 87.0 and res["grader_points"] == 90 and res["grader_note"] == "Good proof"
+    assert ok(client.get(f"/api/courses/{course['id']}", headers=S))["assignments"][0]["my_score"] == 87.0
+    # The instructor can change the weighting and the points scale later
+    ok(client.patch(f"/api/assignments/{asg['id']}", json={"viva_weight": 0.5, "max_points": 200}, headers=I))
+    assert ok(client.get(f"/api/submissions/{sid}", headers=I))["final"] == 62.5  # 45% x 0.5 + 80% x 0.5
+    ok(client.patch(f"/api/assignments/{asg['id']}", json={"viva_weight": 0.3, "max_points": 100}, headers=I))
+    assert client.patch(f"/api/assignments/{asg['id']}", json={"viva_weight": 1.5}, headers=I).status_code == 422
 
     rr = ok(client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 0, "message": "I explained it"}, headers=S))
     assert rr["status"] == "open" and rr["score_before"] == 4
@@ -284,8 +303,100 @@ def test_publish_grades_and_regrade_requests(client):
     done = ok(client.patch(f"/api/regrade-requests/{rr['id']}", json={"override_score": 5, "response": "Fair point"}, headers=I))
     assert done["status"] == "resolved" and done["score_after"] == 5 and done["resolved_by"] == "Prof"
     res = ok(client.get(f"/api/submissions/{sid}", headers=S))["results"]
-    assert res["overall"] == 85.0 and res["dimensions"][0]["adjusted"] and res["dimensions"][0]["instructor_note"] == "Fair point"
+    assert res["viva"] == 85.0 and res["overall"] == 88.5 and res["dimensions"][0]["adjusted"] and res["dimensions"][0]["instructor_note"] == "Fair point"
     assert client.delete(f"/api/regrade-requests/{rr['id']}", headers=S).status_code == 400  # already resolved
 
     rr2 = ok(client.post(f"/api/submissions/{sid}/regrade-requests", json={"dimension_index": 1, "message": "hm"}, headers=S))
     assert client.delete(f"/api/regrade-requests/{rr2['id']}", headers=S).status_code == 204
+
+
+# ---------- relevance check, handouts, 0-5 scale ----------
+
+def test_off_topic_pdf_blocks_viva_until_reupload_or_override(client, fake_gemini):
+    I, (S,), course, _ = make_class(client)
+    asg = ok(client.post(f"/api/courses/{course['id']}/assignments", json={"title": "HW", "parts": ["Sort a list"]}, headers=I))
+    sid = ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4 unrelated")}, headers=S))["id"]
+
+    st = ok(client.get(f"/api/submissions/{sid}/viva", headers=S))
+    assert st["status"] == "off_topic" and st["total_questions"] == 0 and "cooking" in st["relevance_note"]
+    assert client.post(f"/api/submissions/{sid}/viva/answer", data={"question_index": 0, "kind": "main", "text": "x"}, headers=S).status_code == 400
+    assert ok(client.get(f"/api/courses/{course['id']}", headers=I))["assignments"][0]["off_topic_count"] == 1
+
+    # The student can re-upload; a relevant PDF goes straight to the viva
+    ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("b.pdf", b"%PDF-1.4 sorting")}, headers=S))
+    assert ok(client.get(f"/api/submissions/{sid}/viva", headers=S))["status"] == "ready"
+
+    # ...or the instructor overrules the check
+    ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("c.pdf", b"%PDF-1.4 unrelated")}, headers=S))
+    assert client.post(f"/api/submissions/{sid}/allow", headers=S).status_code == 403
+    ok(client.post(f"/api/submissions/{sid}/allow", headers=I))
+    rep = ok(client.get(f"/api/submissions/{sid}", headers=I))
+    assert rep["status"] == "ready" and len(rep["questions"]) == 4 and rep["relevance_override_by"] == "Prof"
+    assert client.post(f"/api/submissions/{sid}/allow", headers=I).status_code == 400  # not off topic any more
+
+
+def test_assignment_handout_extract_and_attach(client, fake_gemini):
+    I, (S,), course, _ = make_class(client)
+    assert client.post("/api/assignments/brief/extract", files={"file": ("h.pdf", b"%PDF-1.4")}, headers=S).status_code == 403
+    draft = ok(client.post("/api/assignments/brief/extract", files={"file": ("h.pdf", b"%PDF-1.4 handout")}, headers=I))
+    assert draft["parts"] == ["1.1 Implement quicksort", "1.2 Analyse it"] and draft["rubric"][0]["name"] == "Pivot choice"
+    assert draft["part_points"] == [10, None]  # None = the handout didn't say
+
+    asg = ok(client.post(f"/api/courses/{course['id']}/assignments",
+                         json={"title": draft["title"], "parts": draft["parts"], "rubric": draft["rubric"]}, headers=I))
+    ok(client.put(f"/api/assignments/{asg['id']}/brief", files={"file": ("h.pdf", b"%PDF-1.4 handout")}, headers=I))
+    view = ok(client.get(f"/api/assignments/{asg['id']}", headers=S))
+    assert view["has_brief"] and view["brief_filename"] == "h.pdf" and "brief_file_id" not in view
+    assert client.get(f"/api/assignments/{asg['id']}/brief", headers=S).content == b"%PDF-1.4 handout"
+
+    # The handout goes to the AI together with each submission
+    ok(client.post(f"/api/assignments/{asg['id']}/submissions", files={"file": ("a.pdf", b"%PDF-1.4 sorting")}, headers=S))
+    assert fake_gemini.briefs[-1] == b"%PDF-1.4 handout"
+
+
+def test_zero_is_a_valid_score(client):
+    I, (S,), _, asg = make_class(client)
+    sid = run_viva(client, asg, S)
+    r = ok(client.patch(f"/api/submissions/{sid}/scores/0", json={"override_score": 0, "override_note": "said I don't know"}, headers=I))
+    assert r["dimensions"][0]["override_score"] == 0 and r["overall"] == 60.0  # (0+4+4+4) / 20
+    assert client.patch(f"/api/submissions/{sid}/scores/0", json={"override_score": 6}, headers=I).status_code == 422
+
+
+def test_question_points_and_per_question_grading(client):
+    I, (S,), course, _ = make_class(client)
+    url = f"/api/courses/{course['id']}/assignments"
+    assert client.post(url, json={"title": "HW", "parts": ["A", "B"], "part_points": [10]}, headers=I).status_code == 400
+    assert client.post(url, json={"title": "HW", "parts": ["A", "B"], "part_points": [10, 0]}, headers=I).status_code == 400
+    # A blank question is dropped together with its points
+    asg = ok(client.post(url, json={"title": "HW", "parts": ["A", " ", "B"], "part_points": [30, 5, 20]}, headers=I))
+    assert asg["parts"] == ["A", "B"] and asg["part_points"] == [30, 20] and asg["max_points"] == 50
+    # Without points, max_points is split evenly
+    even = ok(client.post(url, json={"title": "HW2", "parts": ["A", "B"], "max_points": 40}, headers=I))
+    assert even["part_points"] == [20, 20] and even["max_points"] == 40
+
+    sid = run_viva(client, asg, S)
+    ok(client.patch(f"/api/assignments/{asg['id']}", json={"grades_published": True}, headers=I))
+    gurl = f"/api/submissions/{sid}/question-grades"
+    assert client.put(f"/api/submissions/{sid}/grade", json={"points": 40}, headers=I).status_code == 400  # per question now
+    assert client.put(gurl, json={"questions": [{"points": 1}]}, headers=I).status_code == 400            # one per question
+    assert client.put(gurl, json={"questions": [{"points": 31}, {"points": 1}]}, headers=I).status_code == 400  # over Q1's 30
+    assert client.put(gurl, json={"questions": [{"points": 1}, {"points": 1}]}, headers=S).status_code == 403
+
+    # Partly graded: no grader mark or final grade yet, and the student sees nothing
+    g = ok(client.put(gurl, json={"questions": [{"points": 25, "comment": "Missing base case"}, {"points": None}]}, headers=I))
+    assert g["grader_points"] is None and g["final"] is None
+    rep = ok(client.get(f"/api/submissions/{sid}", headers=I))
+    assert rep["question_grades"][0] == {"points": 25, "comment": "Missing base case"} and rep["questions_graded"] == 1
+    assert ok(client.get(f"/api/submissions/{sid}", headers=S))["results"]["question_grades"] is None
+
+    # Fully graded: points add up. 45/50 = 90% -> 0.7 x 90 + 0.3 x 80 = 87
+    g = ok(client.put(gurl, json={"questions": [{"points": 25, "comment": "Missing base case"}, {"points": 20}], "note": "Nice"}, headers=I))
+    assert g["grader_points"] == 45 and g["final"] == 87.0
+    stu = ok(client.get(f"/api/submissions/{sid}", headers=S))
+    assert stu["results"]["question_grades"][0]["comment"] == "Missing base case" and stu["results"]["part_points"] == [30, 20]
+    assert stu["page_map"] == [[1, 2], []] and "page_order" in stu
+
+    # Question points can change after creation (the questions themselves can't)
+    assert client.patch(f"/api/assignments/{asg['id']}", json={"part_points": [10]}, headers=I).status_code == 400
+    out = ok(client.patch(f"/api/assignments/{asg['id']}", json={"part_points": [25, 25]}, headers=I))
+    assert out["max_points"] == 50 and out["part_points"] == [25, 25]

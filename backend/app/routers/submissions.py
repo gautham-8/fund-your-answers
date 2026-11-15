@@ -7,21 +7,44 @@ from pydantic import BaseModel, Field
 from .. import db, pipeline, schedule, storage
 from ..access import load_assignment, load_submission
 from ..auth import current_user, instructor, student
-from ..config import settings
 
 router = APIRouter(prefix="/api", tags=["submissions"])
 
 
-def _sub_summary(sub: dict) -> dict:
+def _sub_summary(sub: dict, assignment: dict) -> dict:
+    """`overall` is the viva score (%); `final` blends it with the grader's mark once both exist."""
     return {
         "id": str(sub["_id"]),
         "status": sub["status"],
         "error": sub.get("error"),
+        "relevance_note": (sub.get("analysis") or {}).get("relevance_note") if sub["status"] == pipeline.OFF_TOPIC else None,
         "filename": sub.get("filename"),
         "created_at": sub.get("created_at"),
         "overall": sub.get("overall"),
+        "grader_points": sub.get("grader_points"),
+        "questions_graded": sum(g["points"] is not None for g in pipeline.question_grades(assignment, sub)),
+        "final": pipeline.final_grade(assignment, sub),
         "needs_review": sub.get("needs_review"),
         "late": bool(sub.get("late")),
+    }
+
+
+def _grading(assignment: dict) -> dict:
+    return {
+        "max_points": pipeline.max_points(assignment),
+        "part_points": pipeline.part_points(assignment),
+        "viva_weight": pipeline.viva_weight(assignment),
+    }
+
+
+def _pages(sub: dict) -> dict:
+    """What the page viewer needs: which pages answer each question, and the student's page order/rotation."""
+    return {
+        "page_map": sub.get("page_map"),
+        "page_count": sub.get("page_count"),
+        "page_order": sub.get("page_order"),
+        "page_rotation": sub.get("page_rotation"),
+        "pages_pending": pipeline.pages_pending(sub),
     }
 
 
@@ -51,13 +74,19 @@ async def student_results(sub: dict, assignment: dict) -> dict | None:
         return None
     regrades = await db.regrade_requests.find({"submission_id": sub["_id"]}).sort("created_at", -1).to_list(None)
     return {
-        "overall": score["overall"],
+        "overall": pipeline.final_grade(assignment, sub),  # None until a grader has marked the solution
+        "viva": score["overall"],
+        "grader_points": sub.get("grader_points"),
+        "grader_note": sub.get("grader_note", "") if sub.get("grader_points") is not None else "",
+        # Per-question marks, shown only once the whole solution is graded
+        "question_grades": pipeline.question_grades(assignment, sub) if sub.get("grader_points") is not None else None,
+        **_grading(assignment),
         "summary": score.get("summary", ""),
         "dimensions": [
             {
                 "dimension": d["dimension"],
                 "score": d["override_score"] if d.get("override_score") is not None else d["score"],
-                "max": 5,
+                "max": pipeline.SCORE_MAX,
                 "evidence_quote": d.get("evidence_quote", ""),
                 "rationale": d.get("rationale", ""),
                 "instructor_note": d.get("override_note", "") if d.get("override_score") is not None else "",
@@ -95,6 +124,9 @@ async def get_assignment(assignment_id: str, user: dict = Depends(current_user))
     out = db.serialize(assignment)
     out["course"] = {"id": str(course["_id"]), "name": course["name"], "code": course.get("code", "")}
     out["grades_published"] = bool(assignment.get("grades_published"))
+    out.update(_grading(assignment))
+    out.pop("brief_file_id", None)
+    out["has_brief"] = bool(assignment.get("brief_file_id"))
     now = db.now()
     out["released"] = schedule.is_released(assignment, now)
     deadline = schedule.deadline(assignment)
@@ -103,7 +135,7 @@ async def get_assignment(assignment_id: str, user: dict = Depends(current_user))
     if user["role"] == "student":
         sub = await db.submissions.find_one({"assignment_id": assignment["_id"], "student_id": user["_id"]})
         out["my_submission"] = {
-            **_sub_summary(sub),
+            **_sub_summary(sub, assignment),
             "page_map": sub.get("page_map"),
             "page_count": sub.get("page_count"),
             "page_order": sub.get("page_order"),
@@ -111,6 +143,9 @@ async def get_assignment(assignment_id: str, user: dict = Depends(current_user))
             "pages_pending": pipeline.pages_pending(sub),
         } if sub else None
         if sub:
+            # Students only see scores through published results.
+            for k in ("overall", "grader_points", "final", "needs_review"):
+                out["my_submission"].pop(k, None)
             results = await student_results(sub, assignment)
             if results:
                 out["my_submission"]["overall"] = results["overall"]
@@ -121,7 +156,7 @@ async def get_assignment(assignment_id: str, user: dict = Depends(current_user))
         names = {u["_id"]: u for u in students}
         out["submissions"] = [
             {
-                **_sub_summary(s),
+                **_sub_summary(s, assignment),
                 "student": {"name": names[s["student_id"]]["name"], "email": names[s["student_id"]]["email"]}
                 if s["student_id"] in names else None,
             }
@@ -155,14 +190,10 @@ async def upload_submission(
         what = "late due date" if assignment.get("late_due_date") else "due date"
         raise HTTPException(400, f"The {what} has passed, so new submissions are closed")
 
-    data = await file.read()
-    if len(data) > settings.max_pdf_mb * 1024 * 1024:
-        raise HTTPException(413, f"PDF must be under {settings.max_pdf_mb} MB")
-    if not data.startswith(b"%PDF"):
-        raise HTTPException(400, "Please upload a PDF file")
+    data = await storage.read_pdf_upload(file)
 
     existing = await db.submissions.find_one({"assignment_id": assignment["_id"], "student_id": user["_id"]})
-    if existing and existing["status"] not in (pipeline.ANALYZING, pipeline.ANALYSIS_FAILED, pipeline.READY):
+    if existing and existing["status"] not in (pipeline.ANALYZING, pipeline.ANALYSIS_FAILED, pipeline.OFF_TOPIC, pipeline.READY):
         raise HTTPException(409, "You've already started the viva for this assignment, so the PDF can't be replaced")
 
     doc = {
@@ -176,6 +207,11 @@ async def upload_submission(
         "page_order": None,
         "page_rotation": None,
         "pages_confirmed_at": None,
+        "relevance_override_by": None,
+        "grader_points": None,  # a mark for the old PDF doesn't carry over
+        "question_grades": [],
+        "grader_note": "",
+        "graded_by": None,
         "consent_at": None,
         "error": None,
         "late": schedule.is_late(assignment, now),
@@ -200,25 +236,18 @@ async def upload_submission(
 @router.get("/submissions/{submission_id}")
 async def get_submission(submission_id: str, user: dict = Depends(current_user)):
     sub, assignment, course = await load_submission(user, submission_id)
-    out = _sub_summary(sub)
-    out["assignment"] = {"id": str(assignment["_id"]), "title": assignment["title"]}
+    out = _sub_summary(sub, assignment)
+    out["assignment"] = {"id": str(assignment["_id"]), "title": assignment["title"], **_grading(assignment)}
     out["course"] = {"id": str(course["_id"]), "name": course["name"], "code": course.get("code", "")}
 
     if user["role"] == "student":
         # Students see progress only until the instructor publishes grades.
-        out.pop("overall", None)
-        out.pop("needs_review", None)
+        for k in ("overall", "grader_points", "questions_graded", "final", "needs_review"):
+            out.pop(k, None)
         results = await student_results(sub, assignment)
         if results:
             out["results"] = results
-        out.update({
-            "parts": assignment.get("parts") or [],
-            "page_map": sub.get("page_map"),
-            "page_count": sub.get("page_count"),
-            "page_order": sub.get("page_order"),
-            "page_rotation": sub.get("page_rotation"),
-            "pages_pending": pipeline.pages_pending(sub),
-        })
+        out.update({"parts": assignment.get("parts") or [], **_pages(sub)})
         return out
 
     stu = await db.users.find_one({"_id": sub["student_id"]})
@@ -229,7 +258,11 @@ async def get_submission(submission_id: str, user: dict = Depends(current_user))
         "analysis": sub.get("analysis"),
         "questions": sub.get("questions", []),
         "parts": assignment.get("parts") or [],
-        "page_map": sub.get("page_map"),
+        "grader_note": sub.get("grader_note", ""),
+        "graded_by": sub.get("graded_by"),
+        "question_grades": pipeline.question_grades(assignment, sub),
+        "relevance_override_by": sub.get("relevance_override_by"),
+        **_pages(sub),
         "pages_confirmed_at": sub.get("pages_confirmed_at"),
         "consent_at": sub.get("consent_at"),
         "rubric": assignment["rubric"],
@@ -301,7 +334,9 @@ async def retry(submission_id: str, background: BackgroundTasks, user: dict = De
     sub, _, _ = await load_submission(user, submission_id)
     if sub["status"] == pipeline.ANALYSIS_FAILED:
         await db.submissions.update_one({"_id": sub["_id"]}, {"$set": {"status": pipeline.ANALYZING, "error": None}})
-        background.add_task(pipeline.run_analysis, sub["_id"])
+        # If the instructor already let an off-topic PDF through, only the questions need redoing.
+        task = pipeline.run_questions if sub.get("relevance_override_by") else pipeline.run_analysis
+        background.add_task(task, sub["_id"])
         return {"status": pipeline.ANALYZING}
     # Anyone can retry failed scoring; instructors can also re-score a completed viva.
     if sub["status"] == pipeline.SCORING_FAILED or (
@@ -314,7 +349,7 @@ async def retry(submission_id: str, background: BackgroundTasks, user: dict = De
 
 
 class OverrideIn(BaseModel):
-    override_score: int | None = Field(default=None, ge=1, le=5)
+    override_score: int | None = Field(default=None, ge=0, le=pipeline.SCORE_MAX)
     override_note: str = ""
 
 
@@ -322,3 +357,84 @@ class OverrideIn(BaseModel):
 async def override_score(submission_id: str, dim_index: int, body: OverrideIn, user: dict = Depends(instructor)):
     sub, _, _ = await load_submission(user, submission_id)
     return await apply_override(sub, dim_index, body.override_score, body.override_note, user)
+
+
+@router.post("/submissions/{submission_id}/allow")
+async def allow_off_topic(submission_id: str, background: BackgroundTasks, user: dict = Depends(instructor)):
+    """The instructor overrules the relevance check: write the viva questions anyway."""
+    sub, _, _ = await load_submission(user, submission_id)
+    if sub["status"] != pipeline.OFF_TOPIC:
+        raise HTTPException(400, "Only submissions flagged as not answering the assignment can be let through")
+    await db.submissions.update_one(
+        {"_id": sub["_id"]}, {"$set": {"status": pipeline.ANALYZING, "relevance_override_by": user["name"], "error": None}}
+    )
+    background.add_task(pipeline.run_questions, sub["_id"])
+    return {"status": pipeline.ANALYZING}
+
+
+class GradeIn(BaseModel):
+    points: float | None = Field(default=None, ge=0, description="The grader's mark for the written solution; null clears it")
+    note: str = Field(default="", max_length=4000)
+
+
+@router.put("/submissions/{submission_id}/grade")
+async def set_grade(submission_id: str, body: GradeIn, user: dict = Depends(instructor)):
+    """A human grader's mark for the solution itself. The final grade blends it with the viva score."""
+    sub, assignment, _ = await load_submission(user, submission_id)
+    if assignment.get("parts"):
+        raise HTTPException(400, "This assignment has questions: grade each question instead")
+    if body.points is not None and body.points > pipeline.max_points(assignment):
+        raise HTTPException(400, f"Points can't be more than {pipeline.max_points(assignment):g}")
+    changes = {
+        "grader_points": body.points,
+        "grader_note": body.note.strip() if body.points is not None else "",
+        "graded_by": user["name"] if body.points is not None else None,
+        "graded_at": db.now() if body.points is not None else None,
+    }
+    await db.submissions.update_one({"_id": sub["_id"]}, {"$set": changes})
+    sub.update(changes)
+    return {
+        "grader_points": sub["grader_points"], "grader_note": sub["grader_note"], "graded_by": sub["graded_by"],
+        "final": pipeline.final_grade(assignment, sub),
+    }
+
+
+class QuestionGradeIn(BaseModel):
+    points: float | None = Field(default=None, ge=0, description="null = not graded yet")
+    comment: str = Field(default="", max_length=4000)
+
+
+class QuestionGradesIn(BaseModel):
+    questions: list[QuestionGradeIn]
+    note: str = Field(default="", max_length=4000, description="Overall feedback")
+
+
+@router.put("/submissions/{submission_id}/question-grades")
+async def set_question_grades(submission_id: str, body: QuestionGradesIn, user: dict = Depends(instructor)):
+    """Grade the written solution question by question. Once every question has points, they add up to the
+    grader's mark that goes into the final grade."""
+    sub, assignment, _ = await load_submission(user, submission_id)
+    maxes = pipeline.part_points(assignment)
+    if not maxes:
+        raise HTTPException(400, "This assignment has no questions: give one total mark instead")
+    if len(body.questions) != len(maxes):
+        raise HTTPException(400, "Give a grade entry for every question")
+    for i, (q, top) in enumerate(zip(body.questions, maxes), 1):
+        if q.points is not None and q.points > top + 1e-9:
+            raise HTTPException(400, f"Q{i} is worth {top:g} points at most")
+
+    grades = [{"points": q.points, "comment": q.comment.strip()} for q in body.questions]
+    complete = all(g["points"] is not None for g in grades)
+    changes = {
+        "question_grades": grades,
+        "grader_points": round(sum(g["points"] for g in grades), 2) if complete else None,
+        "grader_note": body.note.strip(),
+        "graded_by": user["name"],
+        "graded_at": db.now(),
+    }
+    await db.submissions.update_one({"_id": sub["_id"]}, {"$set": changes})
+    sub.update(changes)
+    return {
+        "question_grades": grades, "grader_points": sub["grader_points"], "grader_note": sub["grader_note"],
+        "graded_by": sub["graded_by"], "final": pipeline.final_grade(assignment, sub),
+    }

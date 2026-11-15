@@ -132,6 +132,11 @@ onUnmounted(() => {
       <div v-else-if="state.status === 'analysis_failed'" class="card text-slate-600">
         We couldn't analyze your PDF. Go back to the assignment to retry or upload again.
       </div>
+      <div v-else-if="state.status === 'off_topic'" class="card space-y-1 text-slate-600">
+        <p class="font-medium text-slate-800">Your PDF doesn't seem to answer this assignment's questions.</p>
+        <p v-if="state.relevance_note" class="text-sm">{{ state.relevance_note }}</p>
+        <p class="text-sm">Go back to the assignment and upload the right file. If you think this is a mistake, your instructor can let it through.</p>
+      </div>
 
       <div v-else-if="state.pages_pending" class="card text-slate-600">
         First confirm which pages answer each question on the assignment page, then come back to start the viva.
@@ -148,7 +153,7 @@ onUnmounted(() => {
         </div>
         <ul class="space-y-3 text-sm text-slate-700">
           <li class="flex gap-3"><Icon name="mic" class="mt-0.5 text-indigo-500" /><span><b>Recording notice:</b> your spoken answers are recorded, transcribed by an AI service (Google Gemini), and stored so your instructor can listen and read the transcript.</span></li>
-          <li class="flex gap-3"><Icon name="chart" class="mt-0.5 text-indigo-500" /><span>The AI produces an <b>understanding score</b> your instructor reviews and can change. It doesn't judge accent, pauses, or phrasing — only content.</span></li>
+          <li class="flex gap-3"><Icon name="chart" class="mt-0.5 text-indigo-500" /><span>The AI produces an <b>understanding score</b> your instructor reviews and can change. It's one part of your grade, next to a human grader's mark for your written solution. It doesn't judge accent, pauses, or phrasing — only content.</span></li>
           <li class="flex gap-3"><Icon name="keyboard" class="mt-0.5 text-indigo-500" /><span>Prefer not to be recorded? You can type your answers instead.</span></li>
         </ul>
         <button class="btn-primary w-full py-2.5 sm:w-auto" @click="consent">I understand — start<Icon name="arrow-right" /></button>
