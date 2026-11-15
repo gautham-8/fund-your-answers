@@ -1,28 +1,59 @@
 /**
- * Record audio with MediaRecorder, then convert to 16 kHz mono WAV.
+ * Record the answer with MediaRecorder, then convert the audio to 16 kHz mono WAV.
  * WAV is accepted by Gemini and plays in every browser, unlike WebM/Opus.
+ *
+ * With `video: true` the camera is captured too (falls back to audio-only if the
+ * camera is unavailable). Only the audio is returned for upload; the video stays
+ * in the browser — `stop()` hands it back as `video` for local use only.
  */
-export async function startRecording() {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-  const recorder = new MediaRecorder(stream)
-  const chunks = []
-  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data)
-  recorder.start()
+export async function startRecording({ video = false } = {}) {
+  let stream
+  let hasVideo = false
+  if (video) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { width: 640, height: 480, facingMode: 'user' } })
+      hasVideo = true
+    } catch {
+      // No camera / camera denied: still let the student answer by voice.
+    }
+  }
+  stream ??= await navigator.mediaDevices.getUserMedia({ audio: true })
+
+  const audioRec = new MediaRecorder(new MediaStream(stream.getAudioTracks()))
+  const audioChunks = []
+  audioRec.ondataavailable = (e) => e.data.size && audioChunks.push(e.data)
+  audioRec.start()
+
+  let videoRec = null
+  const videoChunks = []
+  if (hasVideo) {
+    videoRec = new MediaRecorder(stream)
+    videoRec.ondataavailable = (e) => e.data.size && videoChunks.push(e.data)
+    videoRec.start()
+  }
 
   const stopTracks = () => stream.getTracks().forEach((t) => t.stop())
+  const finish = (r) =>
+    !r || r.state === 'inactive'
+      ? Promise.resolve()
+      : new Promise((resolve) => {
+          r.onstop = resolve
+          r.stop()
+        })
 
   return {
+    stream,
+    hasVideo,
     async stop() {
-      await new Promise((resolve) => {
-        recorder.onstop = resolve
-        recorder.stop()
-      })
+      await Promise.all([finish(audioRec), finish(videoRec)])
       stopTracks()
-      const raw = new Blob(chunks, { type: recorder.mimeType })
-      return toWav(raw)
+      const raw = new Blob(audioChunks, { type: audioRec.mimeType })
+      const videoBlob = videoRec ? new Blob(videoChunks, { type: videoRec.mimeType }) : null
+      return { audio: await toWav(raw), video: videoBlob }
     },
     cancel() {
-      if (recorder.state !== 'inactive') recorder.stop()
+      if (audioRec.state !== 'inactive') audioRec.stop()
+      if (videoRec && videoRec.state !== 'inactive') videoRec.stop()
       stopTracks()
     },
   }

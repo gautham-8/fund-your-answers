@@ -1,21 +1,26 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { startRecording } from '../lib/recorder'
 import Icon from '../components/Icon.vue'
 
 const props = defineProps({ id: String })
 const MAX_SECONDS = 180
+const PREP_SECONDS = 60
 
 const state = ref(null)
 const error = ref('')
-const phase = ref('idle') // idle | recording | processing
+const phase = ref('idle') // idle | starting | recording | processing
 const seconds = ref(0)
 const typing = ref(false)
 const typed = ref('')
 const lastTranscript = ref('')
+const prepLeft = ref(0) // seconds of preparation left before recording auto-starts; 0 = no countdown
+const hasVideo = ref(false)
+const preview = ref(null) // <video> element for the live camera preview
 let rec = null
 let tick = null
+let prepTimer = null
 
 const current = computed(() => state.value?.current)
 const done = computed(() => state.value && !current.value && ['scoring', 'completed', 'scoring_failed'].includes(state.value.status))
@@ -23,7 +28,9 @@ const progress = computed(() => {
   if (!state.value) return 0
   return Math.round((state.value.answered_questions / Math.max(1, state.value.total_questions)) * 100)
 })
-const clock = computed(() => `${Math.floor(seconds.value / 60)}:${String(seconds.value % 60).padStart(2, '0')}`)
+const fmt = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+const clock = computed(() => fmt(seconds.value))
+const prepClock = computed(() => fmt(prepLeft.value))
 const micSupported = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined'
 
 async function load() {
@@ -44,15 +51,48 @@ function speak() {
   window.speechSynthesis.speak(new SpeechSynthesisUtterance(current.value.question))
 }
 
+function stopPrep() {
+  clearInterval(prepTimer)
+  prepTimer = null
+  prepLeft.value = 0
+}
+
+// Each new question gets a prep countdown; recording starts by itself when it runs out.
+function startPrep() {
+  stopPrep()
+  if (!micSupported || typing.value) return
+  prepLeft.value = PREP_SECONDS
+  prepTimer = setInterval(() => {
+    prepLeft.value--
+    if (prepLeft.value <= 0) {
+      stopPrep()
+      if (phase.value === 'idle' && !typing.value) startRec()
+    }
+  }, 1000)
+}
+
+const questionKey = computed(() =>
+  state.value?.consent_given && current.value ? `${current.value.question_index}-${current.value.kind}` : null,
+)
+watch(questionKey, (key) => (key ? startPrep() : stopPrep()))
+watch(typing, (t) => t && stopPrep())
+
 async function startRec() {
+  stopPrep()
+  if (phase.value !== 'idle') return
   error.value = ''
+  phase.value = 'starting'
   try {
-    rec = await startRecording()
+    rec = await startRecording({ video: true })
   } catch {
+    phase.value = 'idle'
     error.value = 'Could not access your microphone. Allow mic access in your browser, or type your answer instead.'
     return
   }
+  hasVideo.value = rec.hasVideo
   phase.value = 'recording'
+  await nextTick()
+  if (preview.value && rec?.hasVideo) preview.value.srcObject = rec.stream
   seconds.value = 0
   tick = setInterval(() => {
     seconds.value++
@@ -65,9 +105,10 @@ async function stopRec() {
   if (!rec) return
   phase.value = 'processing'
   try {
-    const wav = await rec.stop()
+    // The video is only captured locally — we upload the audio and let the video go.
+    const { audio } = await rec.stop()
     rec = null
-    await send({ audio: wav })
+    await send({ audio })
   } catch (e) {
     error.value = e.message
     phase.value = 'idle'
@@ -75,6 +116,7 @@ async function stopRec() {
 }
 
 function cancelRec() {
+  stopPrep()
   clearInterval(tick)
   rec?.cancel()
   rec = null
@@ -152,7 +194,7 @@ onUnmounted(() => {
           <p class="mt-1 text-slate-500">{{ state.total_questions }} questions about the methods and decisions in your own submission. Some may have one follow-up.</p>
         </div>
         <ul class="space-y-3 text-sm text-slate-700">
-          <li class="flex gap-3"><Icon name="mic" class="mt-0.5 text-indigo-500" /><span><b>Recording notice:</b> your spoken answers are recorded, transcribed by an AI service (Google Gemini), and stored so your instructor can listen and read the transcript.</span></li>
+          <li class="flex gap-3"><Icon name="mic" class="mt-0.5 text-indigo-500" /><span><b>Recording notice:</b> you get 1 minute to prepare for each question, then recording starts automatically (you can start sooner). Your camera is on while you answer; the video stays on your device and is not uploaded. Your spoken answers are recorded, transcribed by an AI service (Google Gemini), and stored so your instructor can listen and read the transcript.</span></li>
           <li class="flex gap-3"><Icon name="chart" class="mt-0.5 text-indigo-500" /><span>The AI produces an <b>understanding score</b> your instructor reviews and can change. It's one part of your grade, next to a human grader's mark for your written solution. It doesn't judge accent, pauses, or phrasing — only content.</span></li>
           <li class="flex gap-3"><Icon name="keyboard" class="mt-0.5 text-indigo-500" /><span>Prefer not to be recorded? You can type your answers instead.</span></li>
         </ul>
@@ -216,9 +258,27 @@ onUnmounted(() => {
                 >
                   <Icon name="mic" :size="30" />
                 </button>
-                <span class="text-sm font-medium text-slate-700">Tap to record your answer</span>
+                <template v-if="prepLeft > 0">
+                  <span class="text-sm font-medium text-slate-700">
+                    Recording starts in <span class="font-mono font-semibold text-indigo-600">{{ prepClock }}</span>
+                  </span>
+                  <div class="h-1 w-48 overflow-hidden rounded-full bg-slate-200">
+                    <div class="h-full bg-indigo-500 transition-[width] duration-1000 ease-linear" :style="{ width: `${(prepLeft / PREP_SECONDS) * 100}%` }"></div>
+                  </div>
+                  <button class="btn-secondary btn-sm" @click="startRec">I'm ready — start now</button>
+                </template>
+                <span v-else class="text-sm font-medium text-slate-700">Tap to record your answer</span>
               </template>
+              <div v-else-if="phase === 'starting'" class="flex items-center gap-2 py-6 text-sm text-slate-600">
+                <span class="size-4 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600"></span>
+                Turning on your camera and microphone…
+              </div>
               <template v-else-if="phase === 'recording'">
+                <div v-if="hasVideo" class="relative w-full max-w-sm overflow-hidden rounded-2xl bg-slate-900 ring-1 ring-slate-200">
+                  <video ref="preview" autoplay muted playsinline class="aspect-[4/3] w-full -scale-x-100 object-cover"></video>
+                  <span class="absolute top-2 left-2 rounded-full bg-black/50 px-2 py-0.5 text-[11px] font-medium text-white">Not uploaded</span>
+                </div>
+                <p v-else class="text-xs text-slate-500">Camera unavailable — recording audio only.</p>
                 <button class="relative grid size-20 place-items-center rounded-full bg-rose-600 text-white shadow-lg shadow-rose-500/30 transition hover:bg-rose-500" aria-label="Stop and submit" @click="stopRec">
                   <span class="absolute inset-0 animate-ping rounded-full bg-rose-500/40"></span>
                   <Icon name="stop" :size="26" class="relative" />
@@ -233,7 +293,7 @@ onUnmounted(() => {
               </template>
             </div>
             <div class="flex flex-col items-center gap-2 border-t border-slate-100 pt-5 text-center">
-              <p class="text-xs text-slate-500">Take your time. Speak naturally — up to 3 minutes per answer.</p>
+              <p class="text-xs text-slate-500">Use the minute to think it through, then speak naturally — up to 3 minutes per answer.</p>
               <button v-if="phase === 'idle'" class="btn-ghost btn-sm" @click="typing = true"><Icon name="keyboard" :size="14" />Type instead</button>
             </div>
           </template>
