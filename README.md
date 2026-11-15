@@ -1,4 +1,4 @@
-# Fund your answers
+# GradeProof
 
 **Check that students understand the work they hand in, with a short voice viva after every submission.**
 

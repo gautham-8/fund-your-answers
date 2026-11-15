@@ -46,7 +46,7 @@ watch(() => route.fullPath, () => (mobileOpen.value = false))
         <button class="icon-btn -ml-1" aria-label="Open menu" @click="mobileOpen = true"><Icon name="menu" :size="18" /></button>
         <RouterLink to="/" class="flex items-center gap-2">
           <span class="grid size-7 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600"><LogoMark class="size-5" /></span>
-          <span class="font-semibold tracking-tight">Fund your answers</span>
+          <span class="font-semibold tracking-tight">GradeProof</span>
         </RouterLink>
       </header>
       <main :class="route.meta.wide ? 'w-full px-3 py-3 sm:px-4 lg:py-4' : 'mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10'">

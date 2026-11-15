@@ -14,7 +14,7 @@ We were also clear about what we did **not** want to build: another "AI detector
 
 ## What it does
 
-**Fund your answers** is a small Gradescope-style app with a viva built in:
+**GradeProof** is a small Gradescope-style app with a viva built in:
 
 1. **The instructor uploads a handout.** Gemini extracts the questions and their points and drafts a viva rubric. Everything stays editable.
 2. **The student submits a PDF.** The AI first checks that the file actually answers this assignment. Then it matches pages to questions, and the student confirms the matches.

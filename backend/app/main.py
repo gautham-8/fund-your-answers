@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Fund your answers", lifespan=lifespan)
+app = FastAPI(title="GradeProof", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
