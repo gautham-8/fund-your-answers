@@ -5,6 +5,7 @@ import { auth, logout } from '../lib/auth'
 import { courseColor, courseMonogram, initials, termRank } from '../lib/format'
 import { resetStore, store } from '../lib/store'
 import Icon from './Icon.vue'
+import LogoMark from './LogoMark.vue'
 
 const props = defineProps({ collapsed: Boolean, mobileOpen: Boolean })
 const emit = defineEmits(['toggle', 'close'])
@@ -64,7 +65,7 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
     <!-- Brand -->
     <div class="flex h-16 shrink-0 items-center gap-2 px-4" :class="mini ? 'justify-center' : 'justify-between'">
       <RouterLink to="/" class="flex items-center gap-2.5" @click="emit('close')">
-        <span class="grid size-8 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white shadow-sm shadow-indigo-500/30">F</span>
+        <span class="grid size-8 place-items-center rounded-lg bg-linear-to-br from-indigo-500 to-violet-600 shadow-sm shadow-indigo-500/30"><LogoMark class="size-6" /></span>
         <span v-if="!mini" class="text-[15px] font-semibold tracking-tight">Fund your answers</span>
       </RouterLink>
       <button v-if="!mini" class="icon-btn hidden lg:inline-flex" title="Collapse sidebar" @click="emit('toggle')"><Icon name="panel" /></button>
